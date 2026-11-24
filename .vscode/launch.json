@@ -1,0 +1,78 @@
+{
+  "//": "Attach only (cortex-debug extension). Build first: make DEBUG=1. Flash with tools/hw/hw.py flash, never from the IDE (the OpenOCD configs refuse GDB flash writes; do not use 'launch' with J-Link).",
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "D890 cfw: attach J-Link",
+      "servertype": "jlink",
+      "device": "STM32U575ZI",
+      "interface": "swd",
+      "serverArgs": [
+        "-noir",
+        "-nohalt"
+      ],
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build_dbg/cfw.elf",
+      "request": "attach",
+      "type": "cortex-debug",
+      "svdFile": "${workspaceFolder}/../../STM32U5_svd/STM32U5_svd_V1.3/STM32U575.svd",
+      "rttConfig": {
+        "enabled": true,
+        "address": "auto",
+        "decoders": [
+          {
+            "label": "cfw log",
+            "port": 0,
+            "type": "console"
+          }
+        ]
+      }
+    },
+    {
+      "name": "D890 cfw: attach OpenOCD (ST-Link)",
+      "servertype": "openocd",
+      "configFiles": [
+        "${workspaceFolder}/../tools/hw/openocd_d890_stlink.cfg"
+      ],
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build_dbg/cfw.elf",
+      "request": "attach",
+      "type": "cortex-debug",
+      "svdFile": "${workspaceFolder}/../../STM32U5_svd/STM32U5_svd_V1.3/STM32U575.svd",
+      "rttConfig": {
+        "enabled": true,
+        "address": "auto",
+        "decoders": [
+          {
+            "label": "cfw log",
+            "port": 0,
+            "type": "console"
+          }
+        ]
+      }
+    },
+    {
+      "name": "D890 cfw: attach OpenOCD (J-Link)",
+      "servertype": "openocd",
+      "configFiles": [
+        "${workspaceFolder}/../tools/hw/openocd_d890_jlink.cfg"
+      ],
+      "cwd": "${workspaceFolder}",
+      "executable": "${workspaceFolder}/build_dbg/cfw.elf",
+      "request": "attach",
+      "type": "cortex-debug",
+      "svdFile": "${workspaceFolder}/../../STM32U5_svd/STM32U5_svd_V1.3/STM32U575.svd",
+      "rttConfig": {
+        "enabled": true,
+        "address": "auto",
+        "decoders": [
+          {
+            "label": "cfw log",
+            "port": 0,
+            "type": "console"
+          }
+        ]
+      }
+    }
+  ]
+}

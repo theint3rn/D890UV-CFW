@@ -254,8 +254,8 @@ Motorola/Hytera and DMR Association schemes are not public, so they are not impl
 | Item | State |
 |---|---|
 | Tier III authentication (TS 102 361-4 6.4.8): RC4(challenge &#124;&#124; K), bytes 256..258, optional PSN; C_AHOY challenge -> C_ACKU(0x48) | done, tables 6.15 / 6.16 vectors |
-| cfw privacy for voice + packet data, every tier (direct, Tier II, Tier III payload channels) | done, own scheme (below) |
-| Basic / Enhanced Privacy, DMRA ARC4 / AES, Hytera | - (no public spec); `dmr_priv_t.ks` is the hook for a keystream provider |
+| cfw privacy for voice + packet data, every tier (direct, Tier II, Tier III payload channels) | done, own scheme (below): AES-256, AES-128, RC4-40, 16-bit "BP" keys |
+| Basic / Enhanced Privacy, DMRA ARC4 / AES, Hytera, AnyTone stock | - (no public spec; the stock D890UV / D168UV encrypt inside the SCT3288 baseband, encrypted image); `dmr_priv_t.ks` is the hook for a keystream provider |
 
 cfw privacy (only between radios running this firmware): AES-256-CTR, nonce = IV(32 random bits per
 transmission) | superframe(16) | counter(16) | 'V'/'D' | key id. The keystream is xored onto the
@@ -266,6 +266,14 @@ privacy bit (0x40) set in the voice LC; on odd superframes the embedded LC slots
 and pad octets are encrypted, the CRC-32 covers the ciphertext. Frames that cannot be decrypted are
 flagged `DMR_CRYPT_ENCRYPTED` in the voice callback so the platform mutes them. Limitation: on late
 entry the frames before the first privacy LC look clear (nothing marks them yet).
+
+Key sizes (alg field of the PI header / privacy LC, `dmr_priv.h`), so the stock CPS key tables can be used
+(cfw/app/stockcp.c): `DMR_PRIV_CFW_AES256` (1, 32-byte key), `DMR_PRIV_CFW_AES128` (2, 16 bytes, same CTR
+construction), `DMR_PRIV_CFW_RC4` (3, 5..16 bytes: per superframe RC4-drop256 keyed with K | IV | sf | 'V'/'D' |
+key id, keystream from the frame's byte offset), `DMR_PRIV_CFW_BP` (4, 2 bytes: AES-128-CTR with the key
+K16 | "cfw-basic-priv"; 65536 keys, privacy against casual listeners only). The privacy LC carries only the low 4
+bits of the key id: late entry matches keys by alg + low nibble (`dmr_keyring_find_lc`), a PI header seen earlier
+in the call keeps the full id. These are cfw schemes with the stock key sizes, **not** the stock air formats.
 
 ## Open questions (verify with a real capture before relying on them)
 

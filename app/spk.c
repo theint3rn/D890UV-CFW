@@ -12,7 +12,7 @@
  *                 / baseband (no double attenuation).
  *   VOX           hands-free TX from the radio's own detector (vox_hw_*: D168UV RF chip regs 0x12 / 0x13 + PD3,
  *                 D890UV UART4 NR/BT module status): 3 detections in a row (50 ms polls, stock: 3 polls) key the
- *                 channel, 1.5 s without voice releases it.
+ *                 channel, the stock VOX Delay (0.5-3.0 s) without voice releases it.
  *   Power save    when idle (no carrier, no TX / scan / monitor, no key for 5 s) the receiver is switched off and on
  *                 again: 1:1 = 200 ms off / 200 ms on, 2:1 = 400 ms off / 200 ms on (stock option names). A carrier
  *                 seen in an on window keeps it on.
@@ -25,6 +25,7 @@
 #include "board.h"
 #include "radio.h"
 #include "rset.h"
+#include "stockopt.h"
 #include "scan.h"
 #include "aprs.h"
 #include "voice.h"
@@ -92,6 +93,14 @@ static uint8_t s_vox_cfg = 0xFF, s_vox_hits;
 static uint32_t s_vox_last, s_vox_poll;
 bool spk_vox_tx(void) { return s_vox_tx; }
 
+/* stock VOX Delay: 0.5 s + 0.1 s per step (V1.05 list 0x0817A204, 26 entries; absent = stock default 0 = 0.5 s) */
+static uint32_t vox_hang_ms(void)
+{
+    if(!cfwcp_valid()) { return 1500u; }
+    uint32_t v = stockopt_opt(13, 0);
+    return 500u + 100u * (v < 26u ? v : 25u);
+}
+
 static void vox_tick(uint32_t now)
 {
     uint8_t lvl = (uint8_t)(rset_get(RS_VOX) & 3u);
@@ -105,7 +114,7 @@ static void vox_tick(uint32_t now)
     if(!g_radio.tx && s_vox_hits >= 3 && !g_radio.tot_hit && !scan_active() && !aprs_busy()) {
         radio_ptt(true);
         if(g_radio.tx) { s_vox_tx = true; g_spk_dbg[1]++; }
-    } else if(s_vox_tx && now - s_vox_last > 1500u) {
+    } else if(s_vox_tx && now - s_vox_last > vox_hang_ms()) {
         radio_ptt(false);
         s_vox_tx = false;
         g_spk_dbg[2]++;

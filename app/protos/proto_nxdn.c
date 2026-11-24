@@ -16,6 +16,7 @@ typedef struct {
     /* TX (NXDN48 EHR conference call on RDCH) */
     txq_t q;
     uint8_t tx_phase, tx_ran;
+    bool any_ran;
     bool tx_stop;
     uint32_t tx_k;
     uint8_t vcall[10], rel[10], sacch[9];
@@ -117,14 +118,16 @@ static void nx_configure(void *ctx, const cfw_chan_cfg_t *cfg)
 {
     (void)ctx;
     bool efr = cfg->nxdn96;
-    bool restart = !s.inited || cfg->ran != s.cfg.ran || efr != s.efr;
+    bool any_ran = cfw_nxdn_any_ran();               /* stock NX Setting: NXDN Moni on, Moni RAN = Any */
+    bool restart = !s.inited || cfg->ran != s.cfg.ran || efr != s.efr || any_ran != s.any_ran;
+    s.any_ran = any_ran;
     /* rate changed on a running channel: retune to the same frequency = restart the demodulator with the new .air */
     if(s.inited && efr != s.efr && s.pf && s.pf->tune) { s.pf->tune(cfg->rx_hz, 0); }
     s.cfg = *cfg;
     s.efr = efr;
     k_nxdn.air = efr ? k_air96 : k_air48;
     if(!restart) { s.rx.keys = load_keys(); return; }
-    nxdn_rx_cfg_t rc = { 2, efr, false, s.cfg.ran ? (int)s.cfg.ran : -1 };
+    nxdn_rx_cfg_t rc = { 2, efr, false, s.cfg.ran && !any_ran ? (int)s.cfg.ran : -1 };
     nxdn_cb_t cb = { on_voice, on_event, NULL };
     nxdn_rx_init(&s.rx, &rc, &cb);
     s.rx.keys = load_keys();
@@ -143,6 +146,7 @@ static int nx_tx_start(void *ctx, const cfw_tx_req_t *req)
     if(!s.pf->voice_tx) { return -1; }
     uint16_t dst = (uint16_t)(req && req->dst_id ? req->dst_id : (s.cfg.talkgroup ? s.cfg.talkgroup : 1u));
     uint16_t src = (uint16_t)(s.cfg.my_id & 0xFFFFu);
+    if(cfw_nxdn_tx_forbidden(dst)) { return -1; }    /* stock NX Talk Group "TxForbid" */
     s.tx_ran = s.cfg.ran ? s.cfg.ran : 1;
     nxdn_msg_build_vcall(s.vcall, NXDN_MSG_VCALL, NXDN_CALL_CONFERENCE, src, dst);
     nxdn_msg_build_vcall(s.rel, NXDN_MSG_TX_REL, NXDN_CALL_CONFERENCE, src, dst);

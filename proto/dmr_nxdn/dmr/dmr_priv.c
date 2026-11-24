@@ -1,4 +1,5 @@
-/* DMR cfw privacy (AES-256-CTR on vocoder frames / packet data) and Tier III authentication. */
+/* DMR cfw privacy (AES-256 / AES-128 CTR, RC4-40, 16-bit BP on vocoder frames / packet data) and Tier III
+ * authentication. */
 #include "dmr_priv.h"
 #include <string.h>
 
@@ -8,6 +9,43 @@ const dmr_key_t *dmr_keyring_find(const dmr_keyring_t *kr, uint8_t alg, uint8_t 
     for (unsigned i = 0; i < kr->n && i < DMR_MAX_KEYS; i++)
         if (kr->k[i].alg == alg && kr->k[i].key_id == key_id) return &kr->k[i];
     return NULL;
+}
+
+const dmr_key_t *dmr_keyring_find_lc(const dmr_keyring_t *kr, uint8_t alg, uint8_t key_id4)
+{
+    if (!kr) return NULL;
+    for (unsigned i = 0; i < kr->n && i < DMR_MAX_KEYS; i++)
+        if (kr->k[i].alg == alg && (kr->k[i].key_id & 0xFu) == (key_id4 & 0xFu)) return &kr->k[i];
+    return NULL;
+}
+
+int dmr_priv_key_len(uint8_t alg)
+{
+    switch (alg) {
+    case DMR_PRIV_CFW_AES256: return 32;
+    case DMR_PRIV_CFW_AES128: return 16;
+    case DMR_PRIV_CFW_RC4:    return 5;
+    case DMR_PRIV_CFW_BP:     return 2;
+    default:                  return -1;
+    }
+}
+
+/* RC4: one generator per (kind, superframe): RC4(K || IV || sf || kind || key id), first 256 bytes dropped */
+static void rc4_ks(dmr_priv_t *p, uint8_t kind, uint16_t sf, uint32_t off, uint8_t *out, size_t n)
+{
+    uint8_t key[16 + 8];
+    size_t kl = p->rklen;
+    memcpy(key, p->rk, kl);
+    key[kl++] = (uint8_t)(p->iv >> 24); key[kl++] = (uint8_t)(p->iv >> 16); key[kl++] = (uint8_t)(p->iv >> 8);
+    key[kl++] = (uint8_t)p->iv;
+    key[kl++] = (uint8_t)(sf >> 8); key[kl++] = (uint8_t)sf;
+    key[kl++] = kind; key[kl++] = p->key_id;
+    rc4_ctx_t rc;
+    rc4_init(&rc, key, kl);
+    for (uint32_t i = 0; i < 256u + off; i++) (void)rc4_byte(&rc);
+    while (n--) *out++ = rc4_byte(&rc);
+    cipher_wipe(&rc, sizeof rc);
+    cipher_wipe(key, sizeof key);
 }
 
 static void cfw_ks(dmr_priv_t *p, uint8_t kind, uint16_t sf, uint32_t off, uint8_t *out, size_t n)
@@ -32,11 +70,38 @@ static void cfw_ks(dmr_priv_t *p, uint8_t kind, uint16_t sf, uint32_t off, uint8
 int dmr_priv_setup(dmr_priv_t *p, const dmr_key_t *key)
 {
     dmr_priv_wipe(p);
-    if (!key || key->alg != DMR_PRIV_CFW_AES256) return -1;
+    if (!key) return -1;
+    int dl = dmr_priv_key_len(key->alg);
+    if (dl < 0) return -1;
+    int len = key->len ? key->len : dl;
     p->alg = key->alg;
     p->key_id = key->key_id;
-    if (aes_init(&p->aes, key->key, 32) < 0) return -1;
-    p->ks = cfw_ks;
+    switch (key->alg) {
+    case DMR_PRIV_CFW_AES256:
+    case DMR_PRIV_CFW_AES128:
+        if (len != dl || aes_init(&p->aes, key->key, (size_t)len) < 0) { dmr_priv_wipe(p); return -1; }
+        p->ks = cfw_ks;
+        break;
+    case DMR_PRIV_CFW_BP: {
+        static const char pad[] = "cfw-basic-priv";             /* 14 bytes: 2-byte key + pad = AES-128 key */
+        uint8_t k[16];
+        if (len != 2) { dmr_priv_wipe(p); return -1; }
+        k[0] = key->key[0]; k[1] = key->key[1];
+        memcpy(k + 2, pad, 14);
+        aes_init(&p->aes, k, 16);
+        cipher_wipe(k, sizeof k);
+        p->ks = cfw_ks;
+        break;
+    }
+    case DMR_PRIV_CFW_RC4:
+        if (len < 5 || len > 16) { dmr_priv_wipe(p); return -1; }
+        memcpy(p->rk, key->key, (size_t)len);
+        p->rklen = (uint8_t)len;
+        p->ks = rc4_ks;
+        break;
+    default:
+        return -1;
+    }
     p->keyed = true;
     return 0;
 }

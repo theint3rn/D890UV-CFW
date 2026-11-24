@@ -8,14 +8,16 @@
  *   1. wait ID 0x17 status 0x0E (FUN_0810061c)
  *   2. send the raw 6-byte config 74 A9 01 00 01 00 (FUN_08100664, not a framed message)
  *   3. wait ID 0x17 status 00/01 (FUN_081005cc)
- *   4. cmd 0x2D -> reply 00
+ *   4. cmd 0x2D 04 (CODEC_SELECT) -> reply 00, then codec register 0x0B = 02, 82 (stock FUN_080f2540)
  *   5. cmd 0x33 with B0 0x23 -> 9-byte version (BCD date at +3..7)
- *   6. wait ID 0x10 status 00 (FUN_080f30c4)
- * Runs as a non-blocking state machine from bb_poll(). */
+ *   6. cmd 0x10 0C (VOCODER_SEL, the last value the stock boot sends) -> ID 0x10 status 00 (stock waits long for it)
+ * Runs as a non-blocking state machine from bb_poll(). bb_send() refuses everything that hal/bb_allow.h does not list. */
 #include <string.h>
 #include "stm32u5.h"
 #include "board.h"
 #include "hal.h"
+#include "bb_allow.h"
+#include "voc_sct.h"
 
 enum { ST_OFF, ST_WAIT_BOOT, ST_WAIT_READY, ST_WAIT_2D, ST_WAIT_33, ST_WAIT_10, ST_READY, ST_FAIL };
 static const char *const k_state_txt[] = {
@@ -27,6 +29,9 @@ static uint32_t s_t0;
 static uint8_t s_last_tx;
 static uint8_t s_ver[9];
 static bb_msg_cb s_listener;
+static const uint8_t k_codec[1] = { 0x04 };
+static uint16_t s_refused;                          /* commands stopped by the allow-list */
+static uint8_t s_refused_b0, s_refused_id;
 
 /* receive assembly */
 static uint8_t s_rx[6 + 1 + BB_MAX_DATA + 2];
@@ -52,6 +57,10 @@ bool bb_send(uint8_t b0, uint8_t id, const uint8_t *data, uint16_t len)
 {
     static uint8_t f[6 + 1 + BB_MAX_DATA + 1];     /* vocoder PCM packets carry 321 data bytes */
     if(len > BB_MAX_DATA) { return false; }
+    if(!bb_allowed(b0, id, data, len)) {
+        s_refused++; s_refused_b0 = b0; s_refused_id = id;
+        return false;
+    }
     uint16_t n = (uint16_t)(1 + len);
     f[0] = 0x84; f[1] = 0xA9; f[2] = 0x61; f[3] = (uint8_t)(n >> 8); f[4] = (uint8_t)n; f[5] = b0; f[6] = id;
     if(len) { memcpy(&f[7], data, len); }
@@ -71,18 +80,21 @@ static void handle(uint8_t b0, uint8_t id, const uint8_t *d, uint16_t len)
             write_bytes(cfg, sizeof cfg);
             s_state = ST_WAIT_READY; s_t0 = hal_millis();
         } else if(id == 0x17 && st <= 1) {            /* already configured (warm restart) */
-            bb_send(0x00, 0x2D, NULL, 0);
+            bb_send(0x00, 0x2D, k_codec, 1);
             s_state = ST_WAIT_2D; s_t0 = hal_millis();
         }
         break;
     case ST_WAIT_READY:
         if(id == 0x17 && st <= 1) {
-            bb_send(0x00, 0x2D, NULL, 0);
+            bb_send(0x00, 0x2D, k_codec, 1);
             s_state = ST_WAIT_2D; s_t0 = hal_millis();
         }
         break;
     case ST_WAIT_2D:
         if(id == 0x2D) {
+            static const uint8_t r0b[2] = { 0x02, 0x82 };
+            bb_send(0x40, 0x0B, &r0b[0], 1);
+            bb_send(0x40, 0x0B, &r0b[1], 1);
             bb_send(0x23, 0x33, NULL, 0);
             s_state = ST_WAIT_33; s_t0 = hal_millis();
         }
@@ -91,6 +103,8 @@ static void handle(uint8_t b0, uint8_t id, const uint8_t *d, uint16_t len)
         if(id == 0x33) {
             memset(s_ver, 0, sizeof s_ver);
             memcpy(s_ver, d, len < sizeof s_ver ? len : sizeof s_ver);
+            static const uint8_t sel[1] = { 0x0C };
+            bb_send(0x00, 0x10, sel, 1);
             s_state = ST_WAIT_10; s_t0 = hal_millis();
         }
         break;
@@ -161,12 +175,19 @@ void bb_poll(void)
         gpio_set(BB_CS_PORT, BB_CS);
         feed(b);
     }
-    if(s_state != ST_READY && s_state != ST_FAIL && hal_millis() - s_t0 > 5000) {
+    if(s_state != ST_READY && s_state != ST_FAIL && hal_millis() - s_t0 > (s_state == ST_WAIT_10 ? 20000u : 5000u)) {
         s_state = ST_FAIL;                             /* UI shows it; the radio still works in FM */
     }
 }
 
 bool bb_ready(void) { return s_state == ST_READY; }
-const char *bb_status(void) { return k_state_txt[s_state]; }
+const char *bb_status(void) { return s_state == ST_READY ? sct_status_text() : k_state_txt[s_state]; }
+uint16_t bb_refused(uint8_t *b0, uint8_t *id)
+{
+    if(b0) { *b0 = s_refused_b0; }
+    if(id) { *id = s_refused_id; }
+    return s_refused;
+}
 void bb_set_listener(bb_msg_cb cb) { s_listener = cb; }
 const uint8_t *bb_version(void) { return s_ver; }
+

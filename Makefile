@@ -35,6 +35,8 @@ ifeq ($(DEBUG),1)
 BUILD   := $(BUILD)_dbg
 KEEP_SWD := 1
 endif
+# BUILD_SUFFIX=_x: own build dir (build_x/...) when several people build at once
+BUILD   := $(BUILD)$(BUILD_SUFFIX)
 TARGET  := $(BUILD)/cfw
 
 SRCS := startup/startup.c \
@@ -158,7 +160,10 @@ test-libs:
 	$(MAKE) -C $(LIBDIR)/proto/dstar_ysf test
 	$(MAKE) -C $(LIBDIR)/voc/imbe test
 	$(LIBDIR)/tools/efr_loop.sh
+	$(LIBDIR)/tools/bb_allow_test.sh
 	python3 $(LIBDIR)/tools/cfwcp_host_test.py
+	python3 $(LIBDIR)/tools/stockcp_host_test.py
+	python3 $(LIBDIR)/tools/ta_host_test.py
 
 -include $(DEPS)
 .PHONY: all clean emu gdb test-libs

@@ -15,6 +15,7 @@
 #endif
 #include "radio.h"
 #include "voice.h"
+#include "stockcp.h"
 
 static int8_t s_state = -1;              /* -1 not checked, 0 invalid, 1 valid */
 static const cp_settings_t *s_set;
@@ -81,9 +82,24 @@ bool cfwcp_check(void)
         default: break;
         }
     }
-    if(!s_ch || s_nch == 0 || s_nch > 4000) { return false; }
+    if(!s_ch || s_nch == 0 || s_nch > 4000) { stockcp_init(); return false; }
     s_state = 1;
+    stockcp_init();                                            /* stock DMR / NXDN sections (stockcp.c) */
     return true;
+}
+
+const void *cfwcp_section(uint16_t id, uint16_t rec_size, uint32_t *count)
+{
+    if(s_state != 1) { return NULL; }
+    const cp_header_t *h = HDR;
+    const cp_section_t *sec = (const cp_section_t *)(h + 1);
+    for(unsigned i = 0; i < h->n_sections; i++) {
+        if(sec[i].id == id && sec[i].rec_size == rec_size) {
+            if(count) { *count = sec[i].count; }
+            return (const uint8_t *)h + sec[i].offset;
+        }
+    }
+    return NULL;
 }
 
 bool cfwcp_valid(void) { if(s_state < 0) { cfwcp_check(); } return s_state == 1; }
@@ -183,6 +199,10 @@ bool cfwcp_channel(int i, channel_t *c)
         c->ysf_mode = x->ysf_mode;
         c->dstar_rpt = x->dstar_rpt;
     }
+    if(c->key == 0xFF) {                                       /* stock CPS channel encryption columns */
+        uint8_t k = stockcp_channel_key(i, c->mode);
+        if(k != 0xFF) { c->key = (uint8_t)(s_nkey + k); }
+    }
     channel_mode_defaults(c);
     return true;
 }
@@ -216,6 +236,8 @@ static void stock_walk(bool (*fn)(const uint8_t *e, uint32_t pos, void *u), void
         p += 6u + len;
     }
 }
+
+void cfwcp_stock_walk(cfwcp_walk_fn fn, void *u) { stock_walk(fn, u); }
 
 typedef struct { int table, col, row; char *buf; int n; bool found; } sv_t;
 static bool sv_fn(const uint8_t *e, uint32_t pos, void *u)
@@ -480,8 +502,14 @@ bool cfwcp_journal_write(const cp_edit_t *e, int n)
     return cfwcp_check() && ok;
 }
 
-int cfwcp_key_count(void) { return cfwcp_valid() ? (int)s_nkey : 0; }
-const cp_key_t *cfwcp_key(int i) { return (cfwcp_valid() && i >= 0 && (uint32_t)i < s_nkey) ? &s_key[i] : NULL; }
+int cfwcp_own_key_count(void) { return cfwcp_valid() ? (int)s_nkey : 0; }
+int cfwcp_key_count(void) { return cfwcp_valid() ? (int)s_nkey + stockcp_key_count() : 0; }
+const cp_key_t *cfwcp_key(int i)
+{
+    if(!cfwcp_valid() || i < 0) { return NULL; }
+    if((uint32_t)i < s_nkey) { return &s_key[i]; }
+    return stockcp_key(i - (int)s_nkey);
+}
 
 int cfwcp_bandplans(int ts, const cp_bandplan_t **out, int max)
 {

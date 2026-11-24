@@ -52,6 +52,6 @@ picker) # built-in DMR simplex: Menu > Channel settings, colour code 4, talkgrou
 persist) # built-in DMR simplex: Channel settings talkgroup 123, Menu > Save now, power off (board PowerOff), power on:
           # the same channel with TG 123 comes back
   t persist ../settings_persist $(ch $((B + 4))) key:13 key:16x10 key:13 key:16x3 key:11x3 key:2 key:3 key:4 \
-    key:14 key:14 key:13 key:16x17 key:13 wait:1 "0|board PowerOff" wait:3 "0|machine Reset" "0|board PowerOn" wait:6 ;;
+    key:14 key:14 key:13 key:15x2 key:13 wait:1 "0|board PowerOff" wait:3 "0|machine Reset" "0|board PowerOn" wait:6 ;;
 *) echo "unknown tour $tour"; exit 1 ;;
 esac; done

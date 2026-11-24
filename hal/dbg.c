@@ -18,7 +18,7 @@ typedef struct {
     uint32_t flags;                 /* 0 = skip (drop data that does not fit) */
 } rtt_ring_t;
 
-/* layout identical to SEGGER_RTT_CB with 1 up / 1 down buffer (the down buffer is empty: size 0) */
+/* layout identical to SEGGER_RTT_CB with 1 up / 1 down buffer (down: 16 bytes) */
 typedef struct {
     char id[16];
     int32_t max_up;
@@ -29,7 +29,7 @@ typedef struct {
 
 /* not static: tools/hw/hw.py and RTT viewers find it by name / by the "SEGGER RTT" id */
 rtt_cb_t _SEGGER_RTT __attribute__((used, aligned(16)));
-static char s_rtt_up[CFW_RTT_UP_SIZE];
+static char s_rtt_up[CFW_RTT_UP_SIZE], s_rtt_down[16];
 
 void dbg_init(void)
 {
@@ -43,8 +43,8 @@ void dbg_init(void)
     cb->up[0].rd = 0;
     cb->up[0].flags = 0;
     cb->down[0].name = "Terminal";
-    cb->down[0].buf = 0;
-    cb->down[0].size = 0;
+    cb->down[0].buf = s_rtt_down;
+    cb->down[0].size = sizeof s_rtt_down;
     cb->down[0].wr = cb->down[0].rd = cb->down[0].flags = 0;
     /* id last (and back to front, like SEGGER), so a probe scanning RAM never sees a half-built block. The id
      * template is const (flash), so the only RAM copy is the live control block. */
@@ -69,6 +69,15 @@ void dbg_write(const char *s, unsigned n)
     }
     __asm volatile("dmb" ::: "memory");
     r->wr = wr;
+}
+
+int dbg_getc(void)
+{
+    rtt_ring_t *r = &_SEGGER_RTT.down[0];
+    if(r->size == 0 || r->wr == r->rd || r->wr >= r->size) { return -1; }
+    int c = (unsigned char)r->buf[r->rd];
+    r->rd = r->rd + 1 == r->size ? 0 : r->rd + 1;
+    return c;
 }
 
 void dbg_puts(const char *s)

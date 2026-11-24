@@ -89,6 +89,7 @@ void audio_tone(bool on)
 }
 
 bool audio_tone_muted(void) { return knob_step() == 0; }
+uint8_t audio_codec_att(void) { return 0; }                             /* the I2C pot sets the volume */
 
 static void pot_update(void)
 {

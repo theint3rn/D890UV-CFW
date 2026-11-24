@@ -3,6 +3,8 @@
 #include "radio.h"
 #include "rset.h"
 #include "cfwcp.h"
+#include "stockopt.h"
+#include "channels.h"
 #include "hal.h"
 
 #define HOP_FM_MS      150u          /* RF settle + carrier check */
@@ -14,6 +16,7 @@ enum { ST_HOP, ST_LISTEN, ST_HOLD };
 static struct {
     bool on;
     int list, pos, home, prio, since_prio;
+    bool vfo; uint8_t type; uint32_t lo, hi, start;     /* VFO scan: stock VFO Scan Type / start, end frequencies */
     uint8_t st;
     uint32_t t;
     uint16_t del[MAX_DEL];
@@ -93,8 +96,37 @@ const char *scan_name(int list)
     return n;
 }
 
+/* VFO scan: range of the band the VFO is in (VFO Scan Start / End Freq, MHz; unset = the whole band) */
+static void vfo_start(void)
+{
+    char b[16];
+    uint32_t f = g_radio.vfo_ch.rx_hz;
+    bool uhf = f >= 300000000u;
+    memset(&s, 0, sizeof s);
+    s.lo = uhf ? 400000000u : 136000000u; s.hi = uhf ? 480000000u : 174000000u;
+    if(stockopt_opt_text(uhf ? 72 : 74, b, sizeof b)) { uint32_t v = stockopt_mhz(b); if(v >= s.lo && v <= s.hi) { s.lo = v; } }
+    if(stockopt_opt_text(uhf ? 73 : 75, b, sizeof b)) { uint32_t v = stockopt_mhz(b); if(v > s.lo && v <= s.hi) { s.hi = v; } }
+    s.vfo = s.on = true;
+    s.list = -1; s.prio = -1;
+    s.home = g_radio.channel;
+    s.type = (uint8_t)stockopt_opt(14, 0);            /* 0 TO, 1 CO, 2 SE */
+    s.start = f;
+    s.t = hal_millis();
+    s.st = ST_HOP;
+}
+
+static void vfo_next(void)
+{
+    uint32_t f = g_radio.vfo_ch.rx_hz + g_radio.step_hz;
+    if(f > s.hi || f < s.lo) { f = s.lo; }
+    radio_set_vfo_freq(f);
+    s.t = hal_millis();
+    s.st = ST_HOP;
+}
+
 void scan_start(int list)
 {
+    if(g_radio.vfo) { vfo_start(); return; }
     if(list >= cfwcp_scanlist_count()) { list = -1; }
     memset(&s, 0, sizeof s);
     s.list = list;
@@ -113,6 +145,7 @@ void scan_stop(bool stay)
 {
     if(!s.on) { return; }
     s.on = false;
+    if(s.vfo) { if(!stay) { radio_set_vfo_freq(s.start); } return; }
     if(!stay) { radio_goto(s.home); }
 }
 
@@ -124,6 +157,7 @@ int  scan_deleted(void) { return s.ndel; }
 void scan_nuisance(void)
 {
     if(!s.on) { return; }
+    if(s.vfo) { vfo_next(); return; }
     if(s.ndel < MAX_DEL && !deleted(g_radio.channel)) { s.del[s.ndel++] = (uint16_t)g_radio.channel; }
     next();
 }
@@ -133,6 +167,21 @@ void scan_tick(void)
     if(!s.on || g_radio.tx) { return; }
     uint32_t now = hal_millis();
     bool busy = rf_carrier(0) && (!rset_sql_level() || rf_rssi(0) >= rf_sql_thr());   /* stock squelch threshold */
+    if(s.vfo) {                                       /* SCM TO: 5 s per signal; CO: until it is gone; SE: stop */
+        if(s.st == ST_HOP) {
+            if(now - s.t < hop_ms()) { return; }
+            if(!busy) { vfo_next(); return; }
+            if(s.type == 2) { scan_stop(true); return; }
+            s.st = ST_LISTEN; s.t = now;
+        } else if(s.st == ST_LISTEN) {
+            if(s.type == 0 && now - s.t >= 5000u) { vfo_next(); }
+            else if(!busy) { s.st = ST_HOLD; s.t = now; }
+        } else {
+            if(busy) { s.st = ST_LISTEN; if(s.type != 0) { s.t = now; } }
+            else if(now - s.t >= 2000u) { vfo_next(); }
+        }
+        return;
+    }
     switch(s.st) {
     case ST_HOP:
         if(now - s.t < hop_ms()) { return; }

@@ -232,6 +232,10 @@ void dspb_fm_rx(bool on)
 
 /* analog FM audio tap (8 kHz, every sample, squelch ignored): app/aprs_rx.c AFSK receiver; weak default = none */
 __attribute__((weak)) void aprs_rx_sample(int16_t x) { (void)x; }
+/* same tap for the analog signalling decoders (app/sig_dec.c) */
+__attribute__((weak)) void sig_rx_sample(int16_t x) { (void)x; }
+/* same tap for the tone squelch / NOAA alert decoders (app/stockfx.c) */
+__attribute__((weak)) void tone_rx_sample(int16_t x) { (void)x; }
 
 static void fm_rx_poll(void)
 {
@@ -251,6 +255,8 @@ static void fm_rx_poll(void)
         lvl += y * y;
         pcm[np++] = (int16_t)(y > 32767 ? 32767 : y < -32768 ? -32768 : y);
         aprs_rx_sample(pcm[np - 1]);
+        sig_rx_sample(pcm[np - 1]);
+        tone_rx_sample(pcm[np - 1]);
         if(np == sizeof pcm / sizeof pcm[0]) {
             if(lvl / (float)np > 1e5f && !g_dspb_fm_mute) { voice_rx_pcm(pcm, np); }   /* > ~40 Hz rms deviation */
             np = 0; lvl = 0;
@@ -310,8 +316,12 @@ static void fm_tx_poll(void)
     s_tx_w = (s_tx_w + free) % DAC_RING;
 }
 
+/* local tone (speaker alert, app/sig.c): the PWM plays but the receiver keeps running, so RX decoding goes on */
+static bool s_fm_local;
+void dspb_fm_local(bool on) { s_fm_local = on; }
+
 void dspb_fm_poll(void)
 {
     if(s_fm_tx) { fm_tx_poll(); }
-    else if(s_fm_rx) { fm_rx_poll(); }
+    if(s_fm_rx && (!s_fm_tx || s_fm_local)) { fm_rx_poll(); }
 }

@@ -17,20 +17,13 @@
 #include "voice.h"
 #include "gps.h"
 #include "aprs.h"
+#include "sig.h"
 
 #define ROW_H   11
 #define TOP_Y   12
 #define ROWS    ((LCD_H - TOP_Y - 13 - 9) / ROW_H)       /* one help line above the soft keys */
 
-typedef struct um_scr {
-    const char *title;
-    int  (*count)(void);
-    void (*item)(int i, char *label, char *value);
-    void (*select)(int i);
-    bool (*key)(int i, int k);                           /* extra keys; true = handled */
-    void (*draw)(void);                                  /* custom screen (no list) */
-    const char *(*help)(int i);
-} um_scr_t;
+/* um_scr_t: ui_int.h (other UI files add screens: ui_stock.c) */
 
 #define DEPTH 6
 static struct { const um_scr_t *scr; int sel, top; } s_st[DEPTH];
@@ -44,6 +37,9 @@ static void push(const um_scr_t *scr, int sel)
 }
 static void pop(void) { if(s_depth > 0) { s_depth--; } if(!s_depth) { ui_show_main(); } }
 static void close_all(void) { s_depth = 0; ui_show_main(); }
+void um_push(const um_scr_t *scr, int sel) { push(scr, sel); }
+void um_pop(void) { pop(); }
+void um_close(void) { close_all(); }
 
 bool um_active(void) { return s_depth > 0; }
 void um_resume(void) { }
@@ -71,6 +67,7 @@ static void choose(const char *title, const char *const *opt, int n, int cur, vo
     k_choice.title = title;
     push(&k_choice, cur);
 }
+void um_choose(const char *title, const char *const *opt, int n, int cur, void (*set)(int)) { choose(title, opt, n, cur, set); }
 
 /* ------------------------------------------------------------------ number entry (dial, date, time) */
 typedef struct {
@@ -511,13 +508,13 @@ static void sc_select(int i)
 static const um_scr_t k_scan = { "SCAN", sc_count, sc_item, sc_select, NULL, NULL, sc_help };
 
 /* ------------------------------------------------------------------ settings */
-enum { ST_POWER = RS_COUNT, ST_KEYS, ST_DATE = ST_KEYS + RK_COUNT, ST_TIME, ST_ENC, ST_SMSF, ST_N };
+enum { ST_POWER = RS_COUNT, ST_KEYS, ST_BATT = ST_KEYS + RK_COUNT, ST_DATE, ST_TIME, ST_ENC, ST_SMSF, ST_N };
 static const char *const k_pwr[] = { "Low", "Mid", "High", "Turbo" };
 static const char *s_kf_names[KF_COUNT];
 static int s_set_id;
 
 static int st_slot(int i) { return i - ST_KEYS; }
-static bool st_visible(int i) { return i < ST_KEYS || i >= ST_DATE || rset_key_slot_name(st_slot(i)); }
+static bool st_visible(int i) { return i < ST_KEYS || i >= ST_BATT || rset_key_slot_name(st_slot(i)); }
 static int st_map(int i)                    /* visible row -> id */
 {
     for(int id = 0, k = 0; id < ST_N; id++) { if(st_visible(id)) { if(k == i) { return id; } k++; } }
@@ -530,6 +527,7 @@ static void st_item(int i, char *l, char *v)
     int id = st_map(i);
     if(id < RS_COUNT) { fmt_s(l, rset_def((rs_id_t)id)->label); fmt_s(v, rset_text((rs_id_t)id)); return; }
     if(id == ST_POWER) { fmt_s(l, "TX power"); fmt_s(v, k_pwr[radio_tx_power()]); return; }
+    if(id == ST_BATT) { fmt_s(l, "Battery"); fmt_s(v, rset_batt_percent() ? "Percent" : "Icon"); return; }
     if(id == ST_ENC) { fmt_s(l, "Encryption"); fmt_s(v, rset_encryption() ? "On" : "Off"); return; }
     if(id == ST_SMSF) { fmt_s(l, "SMS format"); fmt_s(v, rset_sms_mformat() ? "M-SMS" : "cfw"); return; }
     if(id == ST_DATE || id == ST_TIME) {
@@ -552,6 +550,7 @@ static const char *st_help(int i)
     if(id < RS_COUNT) { return rset_def((rs_id_t)id)->effect; }
     if(id == ST_POWER) { return g_radio.vfo ? "VFO TX power" : "this channel's TX power"; }
     if(id == ST_DATE || id == ST_TIME) { return "RTC (battery backed)"; }
+    if(id == ST_BATT) { return "status bar display"; }
     if(id == ST_ENC) { return "privacy keys - not on ham bands"; }
     if(id == ST_SMSF) { return "SMS TX format (RX: both)"; }
     return "side key function";
@@ -559,6 +558,8 @@ static const char *st_help(int i)
 
 static void set_rs(int v) { rset_set((rs_id_t)s_set_id, (uint8_t)v); if(s_set_id == RS_BKL) { backlight_set((uint8_t)(v + 1)); } }
 static const char *const k_smsf[] = { "cfw", "M-SMS" };
+static const char *const k_batt[] = { "Icon", "Percent" };
+static void set_batt(int v) { rset_set_batt_percent(v == 1); }
 static void set_smsf(int v) { rset_set_sms_mformat(v == 1); }
 static void set_pwr(int v) { radio_set_power((uint8_t)v); }
 static void set_key(int v) { rset_set_key(st_slot(s_set_id), (uint8_t)v); }
@@ -612,6 +613,8 @@ static void st_select(int i)
         choose(d->label, d->opt, d->n, rset_get((rs_id_t)id), set_rs);
     } else if(id == ST_POWER) {
         choose("TX POWER", k_pwr, 4, radio_tx_power(), set_pwr);
+    } else if(id == ST_BATT) {
+        choose("BATTERY", k_batt, 2, rset_batt_percent() ? 1 : 0, set_batt);
     } else if(id == ST_DATE) {
         numed("DATE", "year month day", 8, "####-##-##", false, date_done);
     } else if(id == ST_TIME) {
@@ -700,13 +703,116 @@ static void hd_select(int i) { s_heard_sel = i; push(&k_heard_one, 0); }
 static const char *hd_help(int i) { (void)i; return "stations heard (AFSK 1200)"; }
 static const um_scr_t k_heard = { "APRS HEARD", hd_count, hd_item, hd_select, NULL, NULL, hd_help };
 
+/* ------------------------------------------------------------------ analog signalling (app/sig.c) */
+enum { SG_DTMF, SG_2T, SG_5T, SG_MDC, SG_ABOOK, SG_MBOOK, SG_HEARD, SG_CHAN, SG_N };
+static int s_sg;                                         /* which list k_sig_list shows */
+static int sgl_count(void)
+{
+    switch(s_sg) {
+    case SG_DTMF: return sig_dtmf_count();
+    case SG_2T: return sig_2t_count();
+    case SG_5T: return sig_5t_count();
+    case SG_MDC: return sig_mdc_count();
+    case SG_ABOOK: return sig_abook_count();
+    case SG_MBOOK: return sig_mbook_count();
+    case SG_HEARD: return sig_heard_count();
+    default: return 0;
+    }
+}
+static void hex4(char *v, uint16_t u)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    for(int i = 0; i < 4; i++) { v[i] = hx[(u >> (12 - 4 * i)) & 15]; }
+    v[4] = 0;
+}
+static void sgl_item(int i, char *l, char *v)
+{
+    char a[26], b[18];
+    switch(s_sg) {
+    case SG_DTMF: sig_dtmf(i, a, sizeof a); fmt_u(fmt_s(l, "DTMF "), (uint32_t)i + 1, 1); copy_name(v, a, 12); break;
+    case SG_2T: { sig_2t_t e; sig_2t(i, &e); copy_name(l, e.name[0] ? e.name : "2Tone", 12);
+        char *p = fmt_u(v, e.f1, 1); *p++ = '/'; fmt_u(p, e.f2, 1); break; }
+    case SG_5T: { sig_5t_t e; sig_5t(i, &e); copy_name(l, e.name[0] ? e.name : sig_5t_std_name(e.std), 12); copy_name(v, e.seq, 10); break; }
+    case SG_MDC: case SG_MBOOK: { sig_mdc_t e; if(s_sg == SG_MDC) { sig_mdc(i, &e); } else { sig_mbook(i, &e); }
+        copy_name(l, e.name[0] ? e.name : e.group ? "Group" : "Unit", 12); hex4(v, e.unit); break; }
+    case SG_ABOOK: sig_abook(i, a, sizeof a, b, sizeof b); copy_name(l, b[0] ? b : a, 14); copy_name(v, a, 10); break;
+    case SG_HEARD: { const sig_heard_t *h = sig_heard(i); if(!h) { break; }
+        copy_name(l, h->name[0] ? h->name : h->text, 14);
+        fmt_s(v, h->kind == SIG_DTMF ? "DTMF" : h->kind == SIG_2TONE ? "2T" : h->kind == SIG_5TONE ? "5T" : "MDC"); break; }
+    default: break;
+    }
+}
+static void sgl_select(int i)
+{
+    const char *err = NULL, *what = "SENT";
+    switch(s_sg) {
+    case SG_DTMF: err = sig_send(SIG_DTMF, i); break;
+    case SG_2T: err = sig_send(SIG_2TONE, i); break;
+    case SG_5T: err = sig_send(SIG_5TONE, i); break;
+    case SG_MDC: err = sig_send(SIG_MDC, i); break;
+    case SG_ABOOK: { char a[26], b[18]; sig_abook(i, a, sizeof a, b, sizeof b); err = sig_send_dtmf(a); break; }
+    case SG_MBOOK: { sig_mdc_t e; sig_mbook(i, &e); err = sig_call_mdc(e.unit); what = "CALL ALERT"; break; }
+    case SG_HEARD: { const sig_heard_t *h = sig_heard(i); if(h) { ui_popup(h->text, h->to_me ? "call to this radio" : h->name, C_CYAN); } return; }
+    default: return;
+    }
+    ui_popup(err ? "NOT SENT" : what, err ? err : "", err ? C_ORANGE : C_GREEN);
+}
+static const char *sgl_help(int i) { (void)i; return s_sg == SG_HEARD ? "decoded (newest first)" : "Menu: send on this channel"; }
+static const um_scr_t k_sig_list = { "SIGNALLING", sgl_count, sgl_item, sgl_select, NULL, NULL, sgl_help };
+
+static const char *const k_sig_items[SG_N] = { "Send DTMF", "Send 2Tone", "Send 5Tone", "Send " , "Analog book",
+                                               " book", "Heard", "This channel" };
+static const char *const k_sig_kind[SIG_KIND_N] = { "Off", "DTMF", "2Tone", "5Tone", "" };
+static int sg_count(void) { return SG_N; }
+static void sg_item(int i, char *l, char *v)
+{
+    char *p = fmt_s(l, k_sig_items[i]);
+    if(i == SG_MDC) { fmt_s(p, sig_mdc_label()); }
+    if(i == SG_MBOOK) { fmt_s(fmt_s(l, sig_mdc_label()), " book"); }
+    int n = 0;
+    switch(i) {
+    case SG_CHAN: { const sig_chan_t *c = sig_chan(); fmt_s(v, c->kind == SIG_MDC ? sig_mdc_label() : k_sig_kind[c->kind]); return; }
+    default: s_sg = i; n = sgl_count(); break;
+    }
+    fmt_u(v, (uint32_t)n, 1);
+}
+static void sg_draw_chan(void)
+{
+    const sig_chan_t *c = sig_chan();
+    gfx_clear(C_BLACK);
+    ui_header("SIGNALLING");
+    int y = TOP_Y + 3;
+    char t[32], *p;
+    p = fmt_s(t, "Opt signal "); fmt_s(p, c->kind == SIG_MDC ? sig_mdc_label() : k_sig_kind[c->kind]);
+    gfx_text(4, y, t, C_WHITE, C_BLACK, 1); y += 11;
+    static const char *const pt[4] = { "Off", "Start", "End", "Start+End" };
+    p = fmt_s(t, "PTT ID "); fmt_s(p, pt[c->pttid & 3]); gfx_text(4, y, t, C_WHITE, C_BLACK, 1); y += 11;
+    p = fmt_s(t, "DTMF "); p = fmt_u(p, c->dtmf_id, 1); p = fmt_s(p, " 2T "); p = fmt_u(p, c->tone2_id, 1);
+    p = fmt_s(p, " 5T "); fmt_u(p, c->tone5_id, 1); gfx_text(4, y, t, C_GREY, C_BLACK, 1); y += 11;
+    p = fmt_s(t, sig_mdc_label()); p = fmt_s(p, " entry "); fmt_u(p, c->mdc_id, 1); gfx_text(4, y, t, C_GREY, C_BLACK, 1); y += 11;
+    p = fmt_s(t, "2T decode "); if(c->tone2_dec) { fmt_u(p, c->tone2_dec, 1); } else { fmt_s(p, "off"); }
+    gfx_text(4, y, t, C_GREY, C_BLACK, 1); y += 11;
+    if(radio_current()->mode != CFW_MODE_FM || g_radio.vfo) { gfx_text(4, y, "FM memory channels only", C_ORANGE, C_BLACK, 1); }
+    ui_softkeys(NULL, "BACK");
+}
+static const um_scr_t k_sig_chan = { NULL, zero, NULL, NULL, NULL, sg_draw_chan, NULL };
+static void sg_select(int i)
+{
+    if(i == SG_CHAN) { push(&k_sig_chan, 0); return; }
+    s_sg = i;
+    if(!sgl_count()) { ui_popup(k_sig_items[i][0] == 'S' ? "LIST EMPTY" : "NONE", i == SG_HEARD ? "nothing decoded" : "CPS: Analog", C_ORANGE); return; }
+    push(&k_sig_list, 0);
+}
+static const char *sg_help(int i) { return i <= SG_MDC ? "TX on this FM channel" : i == SG_CHAN ? "codeplug channel columns" : NULL; }
+static const um_scr_t k_sig = { "SIGNALLING", sg_count, sg_item, sg_select, NULL, NULL, sg_help };
+
 /* ------------------------------------------------------------------ root */
 enum { R_ZONE, R_CHANNELS, R_CONTACTS, R_DIAL, R_CALLLOG, R_SMS, R_SCAN, R_MONITOR, R_SETTINGS, R_MODE, R_CHSET,
-       R_STEP, R_RXPOL, R_DEEMPH, R_TONE, R_GPS, R_INFO, R_SAVE, R_HEARD, R_N };
+       R_STEP, R_RXPOL, R_DEEMPH, R_TONE, R_SIG, R_EXTRAS, R_GPS, R_INFO, R_SAVE, R_HEARD, R_N };
 static const char *const k_root[R_N] = { "Zone", "Channels", "Contacts", "Manual dial", "Call log", "SMS", "Scan",
                                          "Monitor", "Settings", "Mode", "Channel settings", "Step", "RX polarity",
-                                         "De-emphasis comp", "Test tone", "GPS / APRS", "Info", "Save now",
-                                         "APRS heard" };
+                                         "De-emphasis comp", "Test tone", "Signalling", "Radio extras", "GPS / APRS", "Info",
+                                         "Save now", "APRS heard" };   /* tests count the last rows from the end */
 
 static void rt_item(int i, char *l, char *v)
 {
@@ -732,6 +838,7 @@ static void rt_item(int i, char *l, char *v)
     case R_TONE: if(voice_test_tone()) { fmt_s(fmt_u(v, voice_test_tone(), 1), "Hz"); } else { fmt_s(v, "off"); } break;
     case R_GPS: fmt_s(v, gps_fix()->valid ? "fix" : gps_present() ? "no fix" : ""); break;
     case R_HEARD: fmt_u(v, (uint32_t)aprs_heard_count(), 1); break;
+    case R_SIG: if(sig_heard_count()) { fmt_s(fmt_u(v, (uint32_t)sig_heard_count(), 1), " heard"); } break;
     default: break;
     }
 }
@@ -758,11 +865,13 @@ static void rt_select(int i)
     case R_RXPOL: g_radio.rx_invert = !g_radio.rx_invert; radio_apply(); break;
     case R_DEEMPH: g_radio.deemph_us = g_radio.deemph_us ? 0 : 750; radio_apply(); break;
     case R_TONE: voice_set_test_tone(voice_test_tone() ? 0 : 440); break;
+    case R_SIG: push(&k_sig, 0); break;
     case R_GPS: push(&k_gps, 0); break;
     case R_HEARD:
         if(!aprs_heard_count()) { ui_popup("APRS HEARD", "none (FM channel)", C_ORANGE); break; }
         push(&k_heard, 0); break;
     case R_INFO: s_depth = 0; ui_show_info(); break;
+    case R_EXTRAS: push(ui_stock_root(), 0); break;      /* ui_stock.c: FM / AM radio, roaming, device info, options */
     case R_SAVE: radio_save(); close_all(); ui_popup("SAVED", rset_in_codeplug() ? "codeplug + radio" : "radio", C_GREEN); break;
     }
 }

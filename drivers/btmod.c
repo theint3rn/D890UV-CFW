@@ -16,6 +16,8 @@
 #include "stm32u5.h"
 #include "board.h"
 #include "hal.h"
+#include "stockfx.h"
+#include <string.h>
 
 #define U4_BASE 0x40004C00u
 #define U4(o) REG32(U4_BASE + (o))
@@ -37,11 +39,13 @@ static void frame(uint8_t cmd, const uint8_t *d, uint8_t len)
     put(0x06);
 }
 
+static void bt_ver(const uint8_t *t, uint8_t n);
 static void on_frame(const uint8_t *f, uint8_t len)
 {
     uint8_t cmd = f[2];
     if(cmd == 0x03 && len >= 4) { s_voice = f[4 + 3] != 0; }
     if(cmd == 0x01 && len >= 1 && f[4] == 0x12) { s_acked = true; }
+    if(cmd == 0x10 && len > 5 && memcmp(f + 4, "+VER:", 5) == 0) { bt_ver(f + 9, (uint8_t)(len - 5)); }
 }
 
 void UART4_IRQHandler(void)
@@ -97,4 +101,60 @@ bool vox_hw_active(void)
     if(!s_init) { return false; }
     if(!s_acked && s_tries && hal_micros() / 1000u - s_last_ms > 200u) { s_tries--; send_vox(); }   /* stock resends */
     return s_vox && s_voice;
+}
+
+/* Bluetooth settings: the module takes the same AT text as the D168UV's, carried in frames of command 0x10
+ * (stock FUN_0810b77c -> FUN_080d71e8(0x10, "AT+" cmd CR LF)). Stock sends after the probe (VER?): AGHF?, PIN?,
+ * LENAME?, CONN?, SPKEN=0, "MICGAIN=" {05 07 09 11 13} (0x0814A458), "SPKGAIN=" {11 16 21 26 30} (0x0814A4A8).
+ * Sent only when Bluetooth is On in the codeplug. Replies: cmd 0x10 text (assumed; the emulator module does not answer AT
+ * text). Frame 0x12 byte 0 also differs between BT on / off in the stock code, but VOX needs it on: left as is. */
+static bt_status_t s_bt;
+static uint8_t s_bt_step;
+static uint32_t s_bt_t;
+static void at(const char *c)
+{
+    char b[24];
+    size_t n = strlen(c);
+    memcpy(b, "AT+", 3); memcpy(b + 3, c, n); b[n + 3] = '\r'; b[n + 4] = '\n';
+    frame(0x10, (const uint8_t *)b, (uint8_t)(n + 5u));
+}
+static void at_gain(const char *name, const char *tab, uint8_t i)
+{
+    char b[12];
+    size_t n = strlen(name);
+    memcpy(b, name, n); b[n] = tab[2 * i]; b[n + 1] = tab[2 * i + 1]; b[n + 2] = 0;
+    at(b);
+}
+void bt_config(bool on, uint8_t mic, uint8_t spk)
+{
+    memset(&s_bt, 0, sizeof s_bt);
+    s_bt.on = on; s_bt.mic = mic < 5 ? mic : 2; s_bt.spk = spk < 5 ? spk : 2;
+    s_bt_step = on ? 1 : 0;
+    if(on) { init(); s_bt_t = hal_micros() / 1000u; }
+}
+void bt_tick(void)
+{
+    if(!s_bt_step) { return; }
+    uint32_t now = hal_micros() / 1000u;
+    if(now - s_bt_t < 300u) { return; }
+    s_bt_t = now;
+    switch(s_bt_step++) {
+    case 1: at("VER?"); break;
+    case 2: at("AGHF?"); break;
+    case 3: at("PIN?"); break;
+    case 4: at("LENAME?"); break;
+    case 5: at("CONN?"); break;
+    case 6: at("SPKEN=0"); break;
+    case 7: at_gain("MICGAIN=", "0507091113", s_bt.mic); break;
+    case 8: at_gain("SPKGAIN=", "1116212630", s_bt.spk); break;
+    default: s_bt_step = 0; break;
+    }
+}
+const bt_status_t *bt_status(void) { return &s_bt; }
+static void bt_ver(const uint8_t *t, uint8_t n)            /* interrupt: module version text */
+{
+    uint8_t k = 0;
+    for(; k < n && k < sizeof s_bt.ver - 1 && t[k] >= 0x20; k++) { s_bt.ver[k] = (char)t[k]; }
+    s_bt.ver[k] = 0;
+    s_bt.present = true;
 }

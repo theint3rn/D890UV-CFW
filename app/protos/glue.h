@@ -59,12 +59,16 @@ static inline size_t txq_take(txq_t *q, uint8_t *out, size_t max)
 }
 /* Encryption hooks (app/radio.c; weak defaults in protos/crypt_weak.c = none). Only used while Settings >
  * Encryption is on (off by default, illegal on amateur bands). kind = cfw_cps KEY_KINDS index (cp_key_t.kind):
- * 3 DMR AES-256 (cfw privacy scheme), 7 NXDN scrambler, 8 NXDN DES, 9 NXDN AES-256.
+ * 0 DMR basic privacy (16 bit), 1 DMR ARC4 (40 bit), 2 DMR AES-128, 3 DMR AES-256 (cfw privacy schemes),
+ * 7 NXDN scrambler, 8 NXDN DES, 9 NXDN AES-256. Keys: codeplug section 12, then the stock key tables (stockcp.c).
  * cfw_crypt_key: i-th usable key of kinds lo..hi (RX keyring), false = no more.
  * cfw_crypt_tx: key of the current channel for TX (gate on, key set, kind lo..hi, not an amateur band). */
 bool cfw_crypt_key(int i, uint8_t lo, uint8_t hi, uint8_t *kind, uint8_t *key_id, const uint8_t **key, uint8_t *len);
 bool cfw_crypt_tx(uint8_t lo, uint8_t hi, uint8_t *kind, uint8_t *key_id, const uint8_t **key, uint8_t *len);
 uint32_t cfw_crypt_iv(void);                 /* 32 fresh bits for an IV */
+/* stock NX Setting / NX Talk Group (app/stockcp.c; weak defaults = off / allowed) */
+bool cfw_nxdn_any_ran(void);                 /* NXDN Moni on with Moni RAN "Any": receive every RAN */
+bool cfw_nxdn_tx_forbidden(uint32_t group);  /* NX Talk Group entry with TxForbid */
 
 /* space-padded fixed callsign field */
 static inline void call_field(char *dst, const char *src, size_t n)

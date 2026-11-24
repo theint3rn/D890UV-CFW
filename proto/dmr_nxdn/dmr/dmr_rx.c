@@ -64,11 +64,17 @@ static void voice_end(dmr_rx_t *rx, uint8_t slot, const dmr_lc_t *lc)
 static void privacy_info(dmr_rx_t *rx, uint8_t slot, uint8_t cc, const dmr_priv_info_t *pi, bool from_pi)
 {
     dmr_slot_state_t *st = &rx->slot[slot];
+    dmr_priv_info_t pf = *pi;
+    /* the privacy LC has only the low 4 bits of the key id: keep the full one a PI header gave for this call */
+    if (!from_pi && st->enc && st->pinfo.iv == pi->iv && st->pinfo.alg == pi->alg &&
+        (st->pinfo.key_id & 0xFu) == (pi->key_id & 0xFu)) pf.key_id = st->pinfo.key_id;
+    pi = &pf;
     bool fresh = !st->enc || st->pinfo.iv != pi->iv || st->pinfo.key_id != pi->key_id || st->pinfo.alg != pi->alg;
     st->enc = true;
     st->pinfo = *pi;
     if (fresh || !st->priv.keyed) {
-        const dmr_key_t *k = dmr_keyring_find(rx->keys, pi->alg, pi->key_id);
+        const dmr_key_t *k = from_pi || pi->key_id > 15 ? dmr_keyring_find(rx->keys, pi->alg, pi->key_id)
+                                                         : dmr_keyring_find_lc(rx->keys, pi->alg, pi->key_id);
         if (dmr_priv_setup(&st->priv, k) < 0) dmr_priv_wipe(&st->priv);
     }
     /* a PI header precedes the first superframe (burst A increments); an embedded LC is inside it */

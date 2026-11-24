@@ -80,10 +80,13 @@ def ax25(fr):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--radio", default="d890", choices=["d890", "d168"])
+    ap.add_argument("--elf", help="cfw ELF (default: the radio's cfw/build)")
     a = ap.parse_args()
     emu = os.path.join(SRC, "emu") if a.radio == "d890" else os.path.join(D168, "emu")
     sys.path.insert(0, emu)
     import txrx_loop as T
+    if a.elf:
+        T.ELF = os.path.abspath(a.elf)
     first = T.first_builtin() if a.radio == "d890" else 1
     name = "aprs_%s" % a.radio
     d = os.path.join(T.OUT, name)

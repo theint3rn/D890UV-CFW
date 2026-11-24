@@ -170,3 +170,68 @@ stock emulator leaves every GPIO (A..I MODER / ODR) unchanged.
   computed by hand from the stock code.
 * Stock boots with `pwm` in place of `timer4` (OSRunning = 1, main screen).
 * Two-radio matrix with TX on PB9: see `emu/README.md` "Simplex matrix".
+
+## Signalling: DTMF / 2-tone / 5-tone / MDC1200 = QDC1200 (2026-11-23)
+* **QDC1200 is MDC1200.** Both stock firmwares carry the same MDC1200 coder (the libmdc1200 structure: encoder at a
+  given rate, single / double packet, 4-phase zero-crossing decoder), and their menus call it "QDC1200" (strings
+  "QDC1200", "QDC1200 Set", "QDC Enc"); the D890UV CPS names its tables "MDC1200 Address Book / Encode", the D168UV CPS
+  "QDC Address Book / QDC1200 Setting / QDC1200 Decode". Evidence:
+  * D890UV V1.05: decoder init `FUN_0813f2f0(4800)`, per-sample `FUN_0813f3d8` (TIM6 IRQ49, ADC ch1 >> 4), bit / sync
+    step `FUN_0813c16c`: `popcount(sync_hi ^ 0x07) + popcount(sync_lo ^ 0x092A446F) < 6` (or `> 34` = inverted),
+    then 112 bits -> `FUN_0813bf48` (CRC). Encoder `FUN_0813f640(9600)`, double packet `FUN_0813f6a0(op, arg, unit,
+    b0, b1, b2, b3)` (second 4-byte block after the first), single `FUN_0813f768`, samples `FUN_0813f590`.
+  * D168UV V1.07: the same decoder `FUN_08011000` (4 phases), sync step `FUN_08013000` with
+    `popcount(.. ^ 7)` and the constant at 0x08013130 = **0x092A446F**; encoder `FUN_080a108c(0x2580)` (9600 Hz),
+    double `FUN_080a10d4` / single `FUN_080a1140`, wrappers `FUN_080a0f8c` / `FUN_080a0fe0`.
+  * Message kinds the stock D890UV sends (`FUN_0810c51c`, kind `DAT_20014e44`; own id `DAT_20014e4a`):
+    0 call alert = double `35 89 <target>` + `80 15 <own>`; 1 radio check `63 85 <target>`; 2 selective call =
+    double + `81 0D` (`83 0D`); 3 / 4 `2B 00` / `2B 0C`; 5 emergency `00 80`; 6 remote monitor `31/71 81`. Acks
+    (`FUN_08125058` cases): `03 00`, `0B 00`, `0B 0C`, `20 00`, double `35 89 .. A0 00 ..`.
+  * Packet format = `emu/streams/gen_mdc1200.py` (preamble 0x55 x7, sync 07 09 2A 44 6F, CRC-16, rate 1/2 code,
+    16 x 7 interleave, 1200 bd differential 1200 / 1800 Hz); the stock V1.05 decoder accepts it
+    (`emu/streams/test_stock_mdc.py`).
+* Channel decode type: stock D890UV channel byte +0x1A, value 4 = MDC1200 (`FUN_0811e99c`) = the CPS "Optional
+  Signal" column (Off, DTMF, 2Tone, 5Tone, MDC1200).
+* Stock TX path: MDC1200 through the PB9 PWM (above). For DTMF / 2-tone / 5-tone not shown: `rf_chip.md` points to a tone
+  generator in the RF chip. The cfw uses the PWM for all of them.
+
+### Used by the cfw (`app/sig.c`, `app/sig_dec.c`, `app/sig_mdc.c`, both radios)
+* TX: the MCU makes the tones / FSK at 48 kHz as FM deviation into the PB9 PWM ring (`dspb_fm_set_source`):
+  DTMF (697..1633 Hz, 1500 Hz deviation per tone, times from the DTMF Settings dialog), 2-tone
+  (2Tone Settings), 5-tone (14 standards ZVEI1 .. CCITT, tone time from the entry,
+  repeated digit -> repeat tone E), MDC1200 (stock op/arg as listed above; call alert as a double packet with the own
+  id). PTT ID at the start / end of each FM transmission per channel (below); manual sends from Menu > Signalling; keypad
+  digits while PTT is held send DTMF.
+* RX: decoders on the 8 kHz FM audio (`aprs_rx_sample` tap, `sig_rx_sample`): DTMF Goertzel, single-tone frequency
+  from zero crossings (280 Hz high pass removes CTCSS) for 2-tone / 5-tone, MDC1200 by a 1500 Hz complex-baseband FM
+  discriminator with integrate-and-dump at 8 bit phases (zero-crossing counting as the stock decoder does failed at
+  ~20 dB SNR in the host test; this one decodes at ~8 dB).
+* Alert tone (stock Alert Tone table, Freq/Time in 10 ms, 5 alerts x 5 steps) on the speaker through the PWM
+  (`dspb_fm_local`: receive decoding continues meanwhile): alert 1 = individual call, 2 = group call, 3 = selective
+  call (DTMF / 2-tone / 5-tone to this radio).
+* Checked: `tools/sig_test.py` (emulator, both radios): TX captures decoded by an independent Python decoder, RX of
+  generated streams and of the other run's captures, and (D890UV, `--stock-mdc`) the **stock V1.05 decoder decodes the
+  cfw's MDC1200 call alert** (op 0x35, arg 0x89, unit 0xBEEF).
+* Setting dialogs (2026-11-24; codeplug section 10 tables 65-68, read with `stockdlg_*`, cached in `sig_cfg()`; absent = stock
+  default). Meanings come from the CPS labels and the user manual (p. 34-36, programming guide 7.3), not from tracing the
+  stock firmware; those marked (a) are assumptions:
+  * DTMF: Transmitting Time (tone and pause), First Digit Time, Pretime and Time-Lapse (silence before / after the code), D
+    Code Pause (a `D` in a code = pause of n s, 0 = tone D) (a), Self ID + Interval Character (`123*456` = call to 123 from
+    456) (a), Group Code = wildcard for a Self ID digit (a), Decoding Response (None = no alert; both others = alert 3).
+  * 2Tone: 1st / 2nd tone duration, Gap; an entry without a 2nd tone is sent as one tone of Long Tone Duration (a). The
+    receiver accepts tones of >= 60 % of the durations (at most 300 ms).
+  * 5Tone: Self ID (empty = the channel's 5Tone ID entry), Decode Standard (index in the CPS order of the standards (a)),
+    Decode Time = length a tone needs (a; 20 ms minimum), Disp AnyID off = other IDs go into the heard list without a
+    popup (a), Decoding Response, Pretime, Time-Lapse, PTT ID Pause Time = no new BOT within that time (a).
+  * PTT ID: DTMF and 5Tone send the BOT / EOT codes of their dialogs (manual; before 2026-11-24 the cfw sent the encode list
+    entry, which was wrong), 2Tone none. 5Tone BOT / EOT (R5tone columns) send the channel's 5Tone encode ID (manual).
+    MDC1200 / QDC1200 PTT ID is the cfw's own behaviour.
+  * 5Tone information codes: sequence = Information ID, alone or after the Self ID (a) -> call with its number and Decoding
+    Response. The function option is never acted on.
+  * Stored, not used: Auto Reset (no squelch by signalling here), Side Tone (would need the speaker path on during TX), DTMF
+    PTT ID on/off and Pause (unit unknown), kill / stun, 5Tone Dec Units, First Delay and First Delay After Stop (meaning
+    unclear), Time Of Decode Tone (D168UV), function option of the information codes.
+* Not done: auto-acknowledge (ACK / Need To Answer, "& Respond" = beep only), remote kill / stun / monitor (stored only; a
+  radio that disables itself over the air is not wanted in a test firmware).
+* Assumptions of the lists: option texts matched by keyword (no stock export with real values seen); Rpga_Mdc, 2TONE Decode;
+  alert 1 / 2 / 3 = individual / group / selective; D890UV own MDC id = the PTT ID entry; 5-tone frequency tables from memory.

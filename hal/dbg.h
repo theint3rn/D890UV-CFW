@@ -5,7 +5,7 @@
  *
  * Read it with:  tools/hw/hw.py --radio d890|d168 log      (J-Link RTT, OpenOCD `rtt`, or a plain memory poll)
  * or any RTT viewer (J-Link RTT Viewer / JLinkRTTLogger, OpenOCD `rtt server`). The control block is the symbol
- * `_SEGGER_RTT`; one up channel ("Terminal", 2 KB), no down channel. Mode = skip on overflow: the radio never
+ * `_SEGGER_RTT`; one up channel ("Terminal", 2 KB), one down channel (16 B, key 'b' = SCT3288 bench check). Mode = skip on overflow: the radio never
  * blocks on a missing or slow probe. Shared by the D890UV and D168UV cfw (MCU-neutral, plain RAM). */
 #ifndef CFW_DBG_H
 #define CFW_DBG_H
@@ -15,6 +15,7 @@
 void dbg_init(void);
 void dbg_write(const char *s, unsigned n);
 void dbg_puts(const char *s);
+int dbg_getc(void);              /* RTT down channel (host -> radio): next byte or -1 */
 /* tiny printf: %d %i %u %x %X %p %s %c %%, width / zero pad (e.g. %08x), 'l' ignored. Max 128 chars per call. */
 void dbg_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #define DBG(...) dbg_printf(__VA_ARGS__)

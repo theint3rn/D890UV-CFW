@@ -1,6 +1,8 @@
 /* DMR glue: proto/dmr_nxdn receiver (Tier II conventional) + Tier III control-channel follow (dmr_t3).
  * Receive only: the D890UV has no 4FSK modulator path for the MCU yet (see docs/FEASIBILITY.md). */
 #include "glue.h"
+#include "emerg.h"
+#include "stockdlg.h"
 #include "dmr.h"
 #include "dmr_t3.h"
 #include "ambe_fec.h"
@@ -53,7 +55,9 @@ enum { DTX_VOICE = 1, DTX_TERM, DTX_DONE, DTX_DATA };
 static g_dmr_t s;
 
 /* ---- talker alias (TS 102 361-2 7.2.18): FLCO 4 header (format 2 bit, length 5 bit, 49 data bits), FLCO 5..7
- * blocks of 56 bits. Formats 0 = 7 bit, 1 = ISO 8 bit, 2 = UTF-8 (ASCII part shown), 3 = UTF-16BE. ---- */
+ * blocks of 56 bits. Formats 0 = 7 bit, 1 = ISO 8 bit, 2 = UTF-8 (ASCII part shown), 3 = UTF-16BE. In the 8 and 16 bit
+ * formats the first of the header's 49 bits is reserved (characters start at octet 3); 7 bit uses all 49. ---- */
+#define TA_START(fmt) ((fmt) ? 1 : 0)
 static void ta_put_bits(uint8_t *dst, int at, const uint8_t *src, int from, int n)
 {
     for(int i = 0; i < n; i++) {
@@ -78,31 +82,36 @@ static void ta_rx(const dmr_lc_t *lc)
     /* decode the contiguous part */
     int bits = 0;
     for(int b = 0; b < 4 && (s.ta_have >> b & 1); b++) { bits += b ? 56 : 49; }
-    int cw = s.ta_fmt == 0 ? 7 : s.ta_fmt == 3 ? 16 : 8, n = 0;
+    int cw = s.ta_fmt == 0 ? 7 : s.ta_fmt == 3 ? 16 : 8, n = 0, st = TA_START(s.ta_fmt);
     char *o = s.ci.alias;
-    for(int c = 0; c < s.ta_len && (c + 1) * cw <= bits && n < (int)sizeof s.ci.alias - 1; c++) {
+    for(int c = 0; c < s.ta_len && st + (c + 1) * cw <= bits && n < (int)sizeof s.ci.alias - 1; c++) {
         uint32_t v = 0;
-        for(int k = 0; k < cw; k++) { int i = c * cw + k; v = v << 1 | (uint32_t)((s.ta_bits[i / 8] >> (7 - i % 8)) & 1); }
+        for(int k = 0; k < cw; k++) { int i = st + c * cw + k; v = v << 1 | (uint32_t)((s.ta_bits[i / 8] >> (7 - i % 8)) & 1); }
         o[n++] = (v >= 0x20 && v < 0x7F) ? (char)v : '?';
     }
     o[n] = 0;
 }
 
-/* ISO 8-bit alias -> the four LCs (header + blocks as needed) */
+/* alias -> the header + block LCs, in the form the stock CPS Talk Alias setting asks for: ISO 8 bit (up to 27
+ * characters), ISO 7 bit (31) or "Unicode" = UTF-16BE (13; the stock menu does not say UTF-8 or UTF-16) */
 static void ta_tx_build(const char *a)
 {
+    uint8_t sel = stockdlg_alias_format();
+    uint8_t fmt = sel == 1 ? 0 : sel == 2 ? 3 : 1;
+    int cw = fmt == 0 ? 7 : fmt == 3 ? 16 : 8, nbits = TA_START(fmt), len = 0;
     uint8_t bits[28];
-    int len = 0;
     memset(bits, 0, sizeof bits);
-    for(; a[len] && len < 27; len++) { bits[len] = (uint8_t)a[len]; }
-    int nbits = len * 8;
+    for(; a[len] && len < 31 && nbits + cw <= 49 + 3 * 56; len++) {
+        uint16_t v = (uint8_t)a[len];
+        for(int k = cw - 1; k >= 0; k--, nbits++) { if(v >> k & 1) { bits[nbits / 8] |= (uint8_t)(0x80u >> (nbits % 8)); } }
+    }
     s.ta_tx_n = (uint8_t)(nbits <= 49 ? 1 : 1 + (nbits - 49 + 55) / 56);
     for(int b = 0; b < s.ta_tx_n; b++) {
         uint8_t *lc = s.ta_tx[b];
         memset(lc, 0, 9);
         lc[0] = (uint8_t)(DMR_FLCO_TALKER_ALIAS_HDR + b);
         if(b == 0) {
-            lc[2] = (uint8_t)(1u << 6 | (uint8_t)len << 1);          /* ISO 8 bit */
+            lc[2] = (uint8_t)(fmt << 6 | (uint8_t)len << 1);
             ta_put_bits(lc, 23, bits, 0, 49);
         } else {
             ta_put_bits(lc, 16, bits, 49 + 56 * (b - 1), 56);
@@ -155,6 +164,9 @@ static void on_event(void *user, const dmr_event_t *ev)
         s.ci.color_code = ev->cc;
         s.ci.encrypted = ev->crypt == DMR_CRYPT_ENCRYPTED;
         s.ci.voice = true;
+        if((ev->lc.svc_opts & 0x80u) && (ev->lc.flco == DMR_FLCO_GROUP_VOICE || ev->lc.flco == DMR_FLCO_UNIT_VOICE)) {
+            dmr_rx_emergency(ev->lc.src, ev->lc.dst);
+        }
         break;
     case DMR_EV_VOICE_END:
         s.ci.voice = false;
@@ -231,15 +243,23 @@ static void dmr_reset(void *ctx)
     s.cfg.rx_hz = 0;                               /* configure() re-initialises the receiver */
 }
 
-/* privacy keys (glue.h hooks): kind 3 = DMR AES-256 -> the library's cfw privacy scheme (DMR_PRIV_CFW_AES256) */
+/* privacy keys (glue.h hooks): cfw_cps key kinds 0 basic privacy (16 bit), 1 ARC4 (40 bit), 2 AES-128, 3 AES-256 ->
+ * the library's cfw privacy schemes (dmr_priv.h: cfw radios only, the stock schemes run in the SCT3288 and are unknown) */
+static const uint8_t k_alg[4] = { DMR_PRIV_CFW_BP, DMR_PRIV_CFW_RC4, DMR_PRIV_CFW_AES128, DMR_PRIV_CFW_AES256 };
+static bool make_key(dmr_key_t *k, uint8_t kind, uint8_t kid, const uint8_t *key, uint8_t len)
+{
+    if(kind > 3 || len > sizeof k->key || (int)len != dmr_priv_key_len(k_alg[kind])) { return false; }
+    memset(k, 0, sizeof *k);
+    k->alg = k_alg[kind]; k->key_id = kid; k->len = len; memcpy(k->key, key, len);
+    return true;
+}
+
 static const dmr_keyring_t *load_keys(void)
 {
     uint8_t kind, kid, len; const uint8_t *key;
     s.keys.n = 0;
-    for(int i = 0; s.keys.n < DMR_MAX_KEYS && cfw_crypt_key(i, 3, 3, &kind, &kid, &key, &len); i++) {
-        if(len != 32) { continue; }
-        dmr_key_t *k = &s.keys.k[s.keys.n++];
-        k->alg = DMR_PRIV_CFW_AES256; k->key_id = kid; memcpy(k->key, key, 32);
+    for(int i = 0; s.keys.n < DMR_MAX_KEYS && cfw_crypt_key(i, 0, 3, &kind, &kid, &key, &len); i++) {
+        if(make_key(&s.keys.k[s.keys.n], kind, kid, key, len)) { s.keys.n++; }
     }
     return s.keys.n ? &s.keys : NULL;
 }
@@ -367,13 +387,12 @@ static int dmr_tx_start(void *ctx, const cfw_tx_req_t *req)
      * superframes, so no talker alias then */
     dmr_priv_t *pv = NULL;
     uint8_t kind, kid, klen; const uint8_t *kb;
-    if(cfw_crypt_tx(3, 3, &kind, &kid, &kb, &klen) && klen == 32) {
-        dmr_key_t k = { DMR_PRIV_CFW_AES256, kid, { 0 } };
-        memcpy(k.key, kb, 32);
+    dmr_key_t k;
+    if(cfw_crypt_tx(0, 3, &kind, &kid, &kb, &klen) && make_key(&k, kind, kid, kb, klen)) {
         if(dmr_priv_setup(&s.priv, &k) == 0) { dmr_priv_sync(&s.priv, cfw_crypt_iv(), 0); pv = &s.priv; s.ta_tx_n = 0; }
         memset(&k, 0, sizeof k);
     }
-    dmr_lc_make_voice(&s.lc, !priv, dst, s.cfg.my_id, pv ? 0x40u : 0);
+    dmr_lc_make_voice(&s.lc, !priv, dst, s.cfg.my_id, (uint8_t)((pv ? 0x40u : 0u) | (dmr_tx_emergency() ? 0x80u : 0u)));
     dmr_call_tx_start(&s.ct, link, s.tx_slot, cc, &s.lc, 2, pv);
     txq_reset(&s.q);
     s.tx_phase = DTX_VOICE;

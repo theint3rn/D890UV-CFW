@@ -23,6 +23,7 @@ bool     dspb_tx_dac_moving(void);
 /* FM through the MCU (test path): RX audio tone meter on ADC1 ch1, TX test tone on the DAC baseband */
 void     dspb_fm_rx(bool on);
 bool     dspb_fm_tx(bool on, uint16_t tone_hz, uint16_t ctcss_dhz);   /* false = not built / no tone */
+void     dspb_fm_local(bool on);                                   /* PWM tone for the speaker only: RX polling continues */
 void     dspb_fm_poll(void);                                           /* main loop, every pass */       /* false = no DMA progress seen (emulator without DAC model): paced by time */
 
 void     dspb_fm_set_source(float (*src)(void));   /* FM TX audio source (deviation Hz per 48 kHz sample), NULL = test tone */

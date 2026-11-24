@@ -30,11 +30,11 @@ import ui_test as U  # noqa: E402
 FAULT_MAGIC = 0xFA17C0DE
 
 BOARD = {
-    "d890": dict(cfw=os.path.join(U.SRC, "cfw"), elf="build_emu/cfw.elf", notx="build_emu_notx/cfw.elf",
+    "d890": dict(cfw=os.environ.get("CFW_SNAP") or os.path.join(U.SRC, "cfw"), elf="build_emu/cfw.elf", notx="build_emu_notx/cfw.elf",
                  pa=[(0x42020014, 15), (0x42021014, 1)], dac=0x46021808, sw=(0x46020C1C, 3), hse_knob=0x46020FFC,
                  cal_ok="s_cal_ok", cal_u="s_b0", cal_v="s_b1", tab_u="s_apc_u", tab_v="s_apc_v", nv=0x2D,
                  tree="D890"),
-    "d168": dict(cfw=os.path.join(U.D168, "cfw"), elf="build_emu/cfw168.elf", notx="build_emu_notx/cfw168.elf",
+    "d168": dict(cfw=os.environ.get("CFW_SNAP") or os.path.join(U.D168, "cfw"), elf="build_emu/cfw168.elf", notx="build_emu_notx/cfw168.elf",
                  pa=[(0x4001180C, 6), (0x4001100C, 4)], dac=0x40007408, sw=(0x40021004, 2), hse_knob=0x400213FC,
                  cal_ok="s_apc_ok", cal_u="s_cu", cal_v="s_cv", tab_u="s_apc_u", tab_v="s_apc_v", nv=0x27,
                  tree="D168", stub_ram=0x20030000),
@@ -92,7 +92,8 @@ def main():
     only = set(x for x in a.only.split(",") if x)
     want = lambda t: not only or t in only   # noqa: E731
     elf = os.path.join(B["cfw"], B["elf"])
-    subprocess.run(["make", "-C", B["cfw"], "-j8", "EMU=1"], check=True, capture_output=True)
+    if not os.environ.get("CFW_SNAP"):
+        subprocess.run(["make", "-C", B["cfw"], "-j8", "EMU=1"], check=True, capture_output=True)
     nm = subprocess.check_output(["arm-none-eabi-nm", elf], text=True)
     S, dup = {}, set()
     for l in nm.splitlines():
@@ -239,7 +240,8 @@ def main():
 
     # ---- F7: HW_NOTX build
     if want("f7"):
-        subprocess.run(["make", "-C", B["cfw"], "-j8", "EMU=1", "HW_NOTX=1"], check=True, capture_output=True)
+        if not os.environ.get("CFW_SNAP"):
+            subprocess.run(["make", "-C", B["cfw"], "-j8", "EMU=1", "HW_NOTX=1"], check=True, capture_output=True)
         r = Run(a, B, "preflash_f7_" + a.radio, ["pttdown", "0.8|rf0 Transmitting", "0.2|shot", "pttup"],
                 elf=os.path.join(B["cfw"], B["notx"]))
         t0 = r.nxt("rf0 Transmitting")

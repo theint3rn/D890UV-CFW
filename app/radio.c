@@ -1,6 +1,7 @@
 #include <string.h>
 #include "radio.h"
 #include "cfwcp.h"
+#include "stockcp.h"
 #include "hal.h"
 #include "modem_core.h"
 #include "dsp_backend.h"
@@ -11,6 +12,14 @@
 #include "gps.h"
 #include "aprs.h"
 #include "spk.h"
+#include "sig.h"
+#include "stockopt.h"
+#include "stockrun.h"
+#include "stockfx.h"
+#include "emerg.h"
+#include "battdisp.h"
+#include "bcast.h"
+#include "board.h"
 
 radio_t g_radio;
 
@@ -69,6 +78,7 @@ void radio_init(void)
     g_radio.zone = -1;
     cfwcp_apply_radio();        /* CPS codeplug radio settings = defaults; persisted menu edits still win */
     rset_init();
+    { uint32_t st = stockopt_step_hz(); if(st) { g_radio.step_hz = st; } }     /* stock Optional Settings Step */
     uint32_t n = settings_load(PERSIST_VERSION, &s_p, sizeof s_p);
     if(n >= offsetof(persist_t, ovr)) {
         if(s_p.zone >= -1 && s_p.zone < zone_count()) { g_radio.zone = s_p.zone; }
@@ -83,6 +93,12 @@ void radio_init(void)
         g_radio.rx_invert = s_p.rx_invert & 1;
         g_radio.deemph_us = s_p.deemph_us <= 2000 ? s_p.deemph_us : 0;
         if(freq_in_band(s_p.vfo_ch.rx_hz) && s_p.vfo_ch.mode < CFW_MODE_COUNT) { g_radio.vfo_ch = s_p.vfo_ch; }
+    }
+    int sz, sc;                                  /* stock Default Startup Channel (Optional Settings Power-on) */
+    if(stockopt_start_channel(&sz, &sc)) {
+        if(sz >= 0 && sz < zone_count() && zone_channel(sz, sc) >= 0) { g_radio.zone = (int16_t)sz; g_radio.channel = zone_channel(sz, sc); }
+        else if(sc >= 0 && sc < channels_count()) { g_radio.channel = sc; }
+        g_radio.vfo = false;
     }
     channel_load(g_radio.channel, &g_radio.mem);
     radio_update_alias();
@@ -141,6 +157,15 @@ void radio_chan_cfg(cfw_chan_cfg_t *cfg)
     cfg->direct = cfg->tx_hz == c->rx_hz;
     cfg->dmr_tdma_direct = c->dmr_tdma;
     cfg->my_id = g_radio.my_id;
+    if(c->mode == CFW_MODE_DMR && !g_radio.vfo && c->src == CH_SRC_CODEPLUG) {   /* stock Radio ID List entry */
+        uint32_t rid = stockcp_channel_radio_id(g_radio.channel);
+        if(rid) { cfg->my_id = rid; }
+    }
+    if(c->mode == CFW_MODE_NXDN) {               /* NXDN unit ID: cfw settings, else stock NX Setting OwnId */
+        const cp_settings_t *st = cfwcp_settings();
+        uint16_t nx = st && st->nxdn_unit_id ? st->nxdn_unit_id : stockcp_nxdn_own_id();
+        if(nx) { cfg->my_id = nx; }
+    }
     memcpy(cfg->my_call, g_radio.my_call, sizeof cfg->my_call);
     cfg->talkgroup = c->talkgroup;
     cfg->color_code = c->color_code;
@@ -182,6 +207,7 @@ void radio_apply(void)
     dac_set_power(radio_tx_power());
     dspb_fm_rx(c->mode == CFW_MODE_FM);
     g_radio.mode_ok = modem_set_mode(c->mode, &cfg);
+    stockfx_channel();
 }
 
 void radio_commit(bool retune)
@@ -279,7 +305,7 @@ void radio_activity(void) { g_radio.last_activity = hal_millis(); }
 void radio_set_vfo_freq(uint32_t hz)
 {
     g_radio.vfo_ch.rx_hz = hz;
-    g_radio.vfo_ch.tx_hz = hz;
+    g_radio.vfo_ch.tx_hz = stockopt_auto_rpt_tx(hz);   /* stock Auto Repeater (Optional Settings + offset list) */
     radio_apply();
 }
 
@@ -312,25 +338,37 @@ void radio_ptt(bool down)
     const channel_t *c = radio_current();
     if(!down) { g_radio.tot_hit = false; }
     if(down && g_radio.tot_hit) { return; }        /* TX timeout: release PTT first */
+    if(down && stockfx_locked()) { return; }         /* power-on password */
     if(down == g_radio.tx) { return; }
     if(down) { scan_stop(true); radio_activity(); spk_stop(); g_radio.enc_tx = 0; }
     uint32_t txf = radio_tx_hz(c);
     if(down && (txf == 0 || !freq_in_band(txf))) { return; }   /* RX-only channel */
     const char *why = down ? safety_tx_block(txf) : 0;     /* HW_NOTX, CLK ERR, no RF cal, forced stop */
     if(why) { tx_note("TX REFUSED", why); return; }
+    if(down && !g_radio.vfo && c->src == CH_SRC_CODEPLUG) {   /* stock channel columns (app/stockopt.c) */
+        so_chan_t so;
+        stockopt_channel(g_radio.channel, &so);
+        if(so.ptt_prohibit) { tx_note("TX PROHIBITED", "channel setting"); return; }
+        /* squelch level 0 (Off) and monitor hold sq_open on without a signal: only the carrier counts then */
+        bool sq_busy = g_radio.sq_open && !g_radio.monitor && rset_sql_level();
+        if(so.busy_lock && (g_radio.carrier || sq_busy)) { tx_note("CHANNEL BUSY", "busy lock"); return; }
+    }
     if(c->mode == CFW_MODE_FM) {
         if(down) {
             rf_set_freq(RF_MAIN, txf);
             rf_set_ctcss(RF_MAIN, c->ctcss_dhz);
             rf_tx_fm(RF_MAIN, true);
             dac_apc(true);                       /* PA control level, as stock */
+            sig_tx_begin(c);                     /* PTT ID at the start (app/sig.c): sets the audio source */
             dspb_fm_tx(true, voice_test_tone(), c->ctcss_dhz);   /* test tone on the DAC (emulator FM test) */
         } else {
+            if(sig_tx_end(c)) { return; }        /* PTT ID at the end: transmitter stays on until it is sent */
             dspb_fm_tx(false, 0, 0);
             dac_apc(false);
             rf_tx_fm(RF_MAIN, false);
             rf_set_freq(RF_MAIN, c->rx_hz);
             rf_rx_fm(RF_MAIN, c->wide);
+            stockfx_ptt_end();
         }
         g_radio.tx = down;
         if(down) { g_radio.tx_since = hal_millis(); }
@@ -342,7 +380,7 @@ void radio_ptt(bool down)
 #endif
     if(down) { voice_tx_prepare(c->mode == CFW_MODE_P25P1 ? CFW_VOC_IMBE_88 : c->mode == CFW_MODE_DSTAR ? CFW_VOC_AMBE_DSTAR : CFW_VOC_AMBE2_49); }
     cfw_tx_req_t req = { .voice = true, .dst_id = c->talkgroup, .slot = c->slot, .color_code = c->color_code,
-                         .private_call = c->private_call, .alias = g_radio.alias[0] ? g_radio.alias : NULL };
+                         .private_call = c->private_call, .alias = g_radio.alias[0] && stockfx_alias_on(c) ? g_radio.alias : NULL };
     modem_ptt(down, &req);
     g_radio.tx = down && modem_transmitting();
     if(g_radio.tx) {
@@ -361,6 +399,11 @@ volatile uint16_t g_dbg_talkaround, g_dbg_cc, g_dbg_nac, g_dbg_ran, g_dbg_dgid;
 
 void radio_tick(void)
 {
+    sig_tick();
+    stockfx_tick();                            /* tone squelch, idle tones, NOAA, auto scan ... (app/stockfx.c) */
+    battdisp_tick();                           /* battery percentage (app/battdisp.c) */
+    emerg_tick();                              /* emergency alarm, work alone (app/emerg.c) */
+    stockrun_tick();                           /* stock common sections: rings, TOT pre-alert, roaming ... */
     if(g_dbg_my_id) { g_radio.my_id = g_dbg_my_id; g_dbg_my_id = 0; radio_commit(false); }
     if(g_dbg_my_call[0]) {
         for(int i = 0; i < 8; i++) { g_radio.my_call[i] = g_dbg_my_call[i]; }
@@ -410,7 +453,13 @@ void radio_tick(void)
             else if(++sql_n > 2) { sql_n = 0; open = false; }
         }
         g_radio.sq_open = open;
-        g_dspb_fm_mute = !open;
+        g_dspb_fm_mute = !open || (!g_radio.monitor && lvl && !stockfx_tone_ok());
+        static bool spk_muted;                     /* speaker follows squelch / tone squelch (FM audio comes from the RF chip) */
+        bool sm = radio_current()->mode == CFW_MODE_FM && g_dspb_fm_mute && bcast_band() == BC_OFF && !spk_ps_sleeping();
+        if(sm || spk_muted) {                      /* re-applied while muted: every retune routes the RF audio again */
+            spk_muted = sm;
+            if(radio_current()->mode == CFW_MODE_FM && bcast_band() == BC_OFF && !spk_ps_sleeping()) { audio_route(sm ? AUDIO_MUTE : AUDIO_RF); }
+        }
         calllog_poll();
         if(modem_call_info()->voice && modem_active()) { radio_activity(); }
     }
@@ -469,11 +518,14 @@ bool cfw_ham_band(uint32_t hz)
     return false;
 }
 
+/* RX keyring: the current channel's key first (keyrings hold only a few keys), then the others in codeplug order */
 bool cfw_crypt_key(int i, uint8_t lo, uint8_t hi, uint8_t *kind, uint8_t *key_id, const uint8_t **key, uint8_t *len)
 {
     if(!rset_encryption()) { return false; }
-    int n = 0;
-    for(int k = 0; k < cfwcp_key_count(); k++) {
+    int n = 0, nk = cfwcp_key_count(), ck = radio_current()->key;
+    for(int j = -1; j < nk; j++) {
+        int k = j < 0 ? ck : j;
+        if(j >= 0 && k == ck) { continue; }
         const cp_key_t *p = cfwcp_key(k);
         if(!p || p->kind < lo || p->kind > hi || !p->len) { continue; }
         if(n++ != i) { continue; }

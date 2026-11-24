@@ -64,7 +64,7 @@ def run(radio, elf, nand, name, sym):
     R = U.RADIOS[radio]
     a = sym["g_cal_info"]
     steps = ["0|sysbus ReadDoubleWord 0x%08X" % (a + o) for o in (0, 4, 8)]
-    steps += ["keys:" + ",".join(["13"] + ["16"] * 16 + ["13"]),    # Menu, down to "Info", Select
+    steps += ["keys:" + ",".join(["13"] + ["15"] * 3 + ["13"]),     # Menu, up to "Info" (3rd from the end), Select
               "keys:14,14", "pttdown", "wait:0.6", "pttup"]               # back to the main screen, PTT
     args = ["--runarg", "--nand", "--runarg", nand] + (["--runarg", "--no-rfcal"] if radio == "d890" else [])
     subprocess.run([sys.executable, os.path.join(HERE, "ui_test.py"), name, "--radio", radio, "--elf", elf] + args

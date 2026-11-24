@@ -1,147 +1,178 @@
-# SCT3288 vocoder interface (for the cfw `SCT3288` backend)
+# SCT3288 vocoder and audio interface (for the cfw `SCT3288` backend)
 
-Status 2026-11-20. Sources: stock V1.05 lifted code + Ghidra, the SCT_Port tool command files
-(`D890UV V1.05 DMR official release 260521/base band 3288 upgrade/SCT_Port 3288/SCT_File/SCT_MAIN/CommandArray_*.xml`,
-decoded with base64), and the emulator. The baseband firmware was **not** decrypted.
-**Confidence:** what V1.05 does = **known**. The packet format = **known**, because the SCT_Port files hold the
-exact bytes. How the chip answers vocoder packets = **unverified**; it must be measured (see §6).
+Status 2026-11-24. Both radios (D890UV, D168UV) use the same chip and the same commands. Sources: stock V1.05 (D890UV)
+and V1.07 (D168UV) code, their frames in the emulator logs, the SCT_Port command files
+(`tools/sct3288/sct3288_commands.md`), and the public CT3258 Packet Interface, CT3258 / SCT3258 datasheets and
+CT3258 Analog Setup (PDFs searched, voice sections read 2026-11-24, `peripheral_fw/sct3258_pdfs/`, keep out of public repos). They describe
+the **older CT3258 / SCT3258**, not the SCT3288: matching IDs are strong hints, not proof. The baseband firmware was **not** decrypted.
 
-## 1. Where the audio goes (stock V1.05)
+Marks: **stock** = the stock firmware does exactly this; **doc** = those public documents; **guess** = combination not seen
+anywhere; only a real radio confirms it.
 
-```
-mic ─► TI TLV320AIC3204 codec ─(I2S/PCM)─► SCT3288 (AMBE+2 vocoder + DMR modem) ─► RF chip
-spk ◄─ TI TLV320AIC3204 codec ◄─(I2S/PCM)─ SCT3288                                ◄─ RF chip
-                         ▲ I2C, bridged by the SCT3288 (packet type 0x40 "TI_*")
-STM32U575 ──SPI2 (control only)──► SCT3288
-```
+**Correction of the 2026-11-20 version:** it said the stock MCU never exchanges PCM or vocoder frames with the chip, and
+that the interface was AMBE-3000 packets (TYPE 0x80..0x82). Both were wrong. TYPE bit 7 means "pass to an *external* AMBE
+chip" (doc), and the stock firmware moves both frames and PCM with TYPE 0x00 commands 0x01, 0x00 and 0x3E (section 2).
 
-* The SCT3288 handles voice from end to end. The stock MCU **never sends or receives PCM or vocoder frames** on SPI2.
-  * `FUN_0802dff8` sends MCU commands. Their packet type comes from `FUN_080c43d4(t)`, which masks it to
-    `t & 0x7f`. The only types V1.05 uses are 0x00, 0x05 (`DAT_2000ecaa`), 0x23 and 0x40.
-  * No MCU wait (`FUN_080f83a4` / `FUN_0810c438` / `FUN_080dee40`) waits for a voice-sized message.
-  * The receive dispatcher `FUN_08146930` handles only status IDs:
-    00 01 15 17 1B 1E 26 27 43 4B 50 51 76 77 7B 7C 7D 7E 7F.
-* The audio codec is a TI AIC3204. SCT_Port ships `AI3204I2C.dll`, and its commands with type 0x40 write codec
-  registers: `40 00 01 <reg> <val> 00 00`, `40 1D 10` ADC→DAC loop, `40 47 80` tone start. Ten stock call sites use
-  `FUN_080c43d4(0x40)`, so the MCU sets codec gain and routing through the SCT.
-* Recording ("Record Switch" menu) and voice prompts exist in the menus. The traced code shows no path that moves
-  audio data to the MCU for them. Either the SCT stores recordings itself (it has `RD/WR_FLASH_DATA` type 0x23/0x03
-  commands), or they use a path not found yet. **Open**, and not needed for the cfw.
-* USB passthrough: `FUN_0801f800` runs at boot. If `#` (key 12) is held, PA8 (PF3) is held low, and the check is
-  repeated, it sets `DAT_2000f075 = 1`. While that flag is set, `FUN_080f335c` copies every SCT frame to USB
-  (`FUN_0810cc1c`), so SCT_Port can talk to the chip **through the radio**. The setting `DAT_2000d74a` also sets the flag.
-  Unverified: that USB→SCT works in this mode as well.
-
-## 2. Packet format (SPI2)
-
-Each packet is an AMBE-3000-style packet with the SPI sync bytes `84 A9` in front:
+## 1. Where the audio goes
 
 ```
-84 A9 | 61 | LenH LenL | TYPE | fields... | [00 pad if Len odd]
-Len = number of bytes after TYPE (TYPE not counted). Fields are big endian.
+mic ─► codec ─(I2S)─► SCT3288: encoder ─► channel frames ─► 4FSK modem ─► RF chip        (stock call)
+spk ◄─ codec ◄─(I2S)─ SCT3288: decoder ◄─ channel frames ◄─ 4FSK modem ◄─ RF chip
+                          ▲  SPI2: commands, channel frames (ID 01), PCM (ID 00)
+                       STM32 / AT32
 ```
 
-The stock emulator notes call TYPE "B0". Types:
+* Microphone and speaker codec hang on the SCT3288, not on the MCU. cfw digital voice uses: TX mic → chip encodes →
+  frames to the MCU → MCU's own FEC / modem; RX MCU frames → chip decodes → speaker.
+* The codec type: both stock radios send `2D 04` (CODEC_SELECT 4). The public document lists 1 = TLV320AIC3204,
+  2 = WM8758B, 3 = ES8338, others reserved, so 4 is unknown and the SCT_Port `TI_*` register tables probably do **not** fit. The cfw writes only the codec registers the
+  stock firmware writes (0x08 speaker attenuation, 0x0F / 0x10 microphone, 0x0B at start-up).
+* `AUDIO_PATHS.md` calls I2C device 0x35 register 0x0F "baseband codec audio". That device is the broadcast receiver
+  (`drivers/bcast.c`), so that line looks wrong.
 
-| TYPE | Use |
-|---|---|
-| 0x00 / 0x05 / 0x23 | DMR control stack (stock). 0x05 = per-channel/slot commands, 0x23 = info reads (0x32/0x33) |
-| 0x03 | SCT flash / config writes (FLASH_*, `03 2D 04` CODEC_SELECT) |
-| 0x40 | TI AIC3204 codec register access through the SCT |
-| **0x80** | **vocoder control** (AMBE-3000 control packet) |
-| **0x81** | **channel packet** = AMBE bits (AMBE-3000 type 0x01) |
-| **0x82** | **speech packet** = PCM (AMBE-3000 type 0x02) |
+## 2. The stock voice interface
 
-Bytes taken from SCT_Port `CommandArray_p_ambe3000.xml` (the SPI tool adds `84 A9` in front of each):
+Frame: `84 A9 61 LenH LenL TYPE ID data… [pad 00 if Len odd]`, Len = bytes after TYPE.
 
-| Name | Bytes (from 0x61) | Meaning (AMBE-3000 field) |
+| Command | Meaning | Evidence |
 |---|---|---|
-| AMBE_PKT_PRODID | `61 00 01 80 30` | product ID string |
-| AMBE_PKT_VERSTRING | `61 00 01 80 31` | version string |
-| AMBE_PKT_RESET | `61 00 01 80 33` | reset vocoder |
-| AMBE_PKT_RESETSOFTCFG | `61 00 07 80 34 20 00 00 20 00 00` | reset + soft config (cfg0..2, mask) |
-| AMBE_PKT_HALT | `61 00 01 80 35` | halt |
-| AMBE_PKT_LOWP | `61 00 01 80 10` | low power |
-| AMBE_PKT_ECMODE | `61 00 03 80 05 00 40` | echo-canceller mode word |
-| AMBE_PKT_GETCFG | `61 00 01 80 36` | read config |
-| AMBE_SPEECHD | `61 01 42 82 00 A0` + 320 B | SPCHD: 160 samples s16 BE, 8 kHz, 20 ms |
-| AMBE_CHAND | `61 00 0B 81 01 48` + 9 B | CHAND: 0x48 = 72 bits (AMBE+2 rate 33 with FEC) |
+| `00 3E <io>` | VOCODER_IO_SET (name: doc), bit mask below | stock D890UV `FUN_080fffe4`, D168UV `FUN_08089c7a` |
+| `05 18 03 03 00` | WORK_MODE duplex with audio loop 3 = vocoder loop (codec ↔ vocoder, no RF). `18 00 00 00` = idle | stock `FUN_080fad68`; SCT_Port ALOOP_VOCODER_LOOP |
+| `05 1A 02` / `80` | PROCESS_MODE digital / analog | stock, doc |
+| `00 10 0C` | VOCODER_SEL digital (doc: 4 AMBE+2, 16 analog). Stock boot sends 04, 10, 0C and waits up to 50 s | stock, doc |
+| `00 01 24 <36 B>` | CHAN_D, 4 frames × 9 bytes (80 ms); `1B` + 27 B = 3 frames (60 ms, DMR). Both directions | stock `FUN_08146930` case 1, `FUN_080fb67c`, `FUN_080fe39c`; doc: 36 bytes per 80 ms |
+| `00 01 <status>` from the chip | "send the next frames" | stock `FUN_08146930` (flag bit 1) |
+| `00 01 FF <fmt>` | frame format: 00 for record / play, 06 for the encryption path (there the MCU works on 49 bits: 6 bytes + 1 bit, rest 0), 02 for another path | stock `FUN_080e724c`, `FUN_0800cfd4` |
+| `00 00 00 A0 <320 B>` | PCM, 160 × s16 big endian, 8 kHz, 20 ms. Both directions | stock `FUN_080f851c` (to chip), `FUN_08146930` case 0 |
+| `00 00 00` from the chip | "send the next PCM" | stock (flag bit 3) |
+| `00 68` / `00 69` + u16 | digital mic / speaker gain (D168UV: 07D0 / 1F40; doc: value / 2048) | stock |
+| `40 0F 90`, `40 10 1E` (D168UV 20) | microphone on; `0F B0`, `10 2E` = off | stock `FUN_080f2594` |
+| `40 08 00..1F` | speaker attenuation, 1F = mute | stock `FUN_080f268c` |
 
-Other vocoder and debug commands in SCT_Port. These use the DMR stack (type 00, ID 0x18 = loop/test mode):
+VOCODER_IO_SET bits, worked out from the stock mode table (D890UV 0x08150FC8 = D168UV 0x080E2F14, identical) and what the
+stock handlers do in each mode:
 
-| Name | Bytes | Note |
+| Bit | Meaning | Stock mode that shows it |
 |---|---|---|
-| VOCODER_INI | `61 00 02 00 12 00` | |
-| VOCODER_SEL | `61 00 02 00 10 04` | reply `84 A9 61 00 0E 30 77 0D …` |
-| READ_VOC_SEL | `61 00 01 20 10` | |
-| VOCODER_CMODE | `61 00 02 00 02 08` | reply `… 20 3A 01` |
-| VOCODER_TONE | `61 00 04 00 08 01 80 F3` | |
-| VOC_ACTIVATION | `61 00 45 00 96 …` (69 B) | vocoder licence/activation; reply `00 17 06` |
-| ALOOP_VOCODER_LOOP | `61 00 04 00 18 03 13 00` | analog-side loops: `03 02` decimator, `03 05` packet, `03 06` 4FSK, `03 11` codec |
-| MLOOP_VOCODER_LOOP | `61 00 04 00 18 03 50 00` | MCU-side loops: `10` codec, `20` 4FSK, `30` packet, `60` decimator |
-| AMLOOP_VOCODER_4FSK_LOOP | `61 00 04 00 18 03 23 00` | |
-| DEBUG_SPEECH_HPI | `61 00 04 00 18 00 00 07` | probably moves speech to the host port (HPI) |
-| Set_HPIMODE / Reset_SCT325x_HPI_MODE | `61 00 02 05 A3 00` / `05 A0 00` / `05 A0 01` | host-port mode |
+| 01 | microphone PCM → MCU | 0xD, 0x15 (recording) |
+| 02 | decoded PCM → MCU | 9 = 0E, 0x14 = 02 (recording received audio) |
+| 04 | received (demodulated) frames → MCU | 7 = 0C (decrypt) |
+| 08 | MCU frames → decoder → speaker | 1 = 08 (play), 7 = 0C |
+| 10 | encoder frames → MCU | 5 = 10 (record) |
+| 20 | encoder frames → MCU **and** modulator (doc, bits 5:4 = 10; 01 = MCU only). With 40 the modulator takes the MCU frames | 6 = 60 (encrypt) |
+| 40 | MCU frames → modulator | 6 = 60, 2 = 40 |
+| 80 | MCU PCM → chip | 0xB, 0xF, 0x18 = 80; 10 = E0 |
 
-Rate selection uses the AMBE-3000 fields, **unverified on the SCT3288**:
-* `80 09 21` RATET 33 = AMBE+2 3600/2450 with FEC, 72 bits per 20 ms (DMR, NXDN, YSF VW/DN-half, dPMR).
-* `80 09 22` RATET 34 = 2450 without FEC, 49 bits (P25 Phase 2 uses the 2450 core plus its own FEC).
-* D-STAR AMBE 3600x2400: RATEP `80 0A 01 30 07 63 40 00 00 00 00 00 00 48`.
-* Full-rate IMBE (P25 Phase 1) is **not** an AMBE-3000 rate. Do IMBE on the MCU (mbelib-style) unless measurement
-  shows otherwise.
+Doc check (Packet Interface 1.2.44): bits 04, 08, 10/20, 40 match the stock reading above; its examples are local record 20,
+remote record 04, local play 08, remote play 40. Bits **01, 02 and 80 are "Reserved" there** (PCM), and it says the command
+and CHAN_D are "only used in DPMR mode" on that chip; their use in DMR/vocoder loop rests on the stock firmware only. There
+is no command 0x00 (PCM) in that document. `40 ..` = TYPE bit 6 "codec bypass": the bytes after TYPE go straight to the
+codec. Answer times: 40 ms normal, CHAN_D 80 ms, VOCODER_SEL 1-3 s, CODEC_SELECT 1 s (doc). VOCODER_SEL 0C is not listed
+(4 = AMBE+2, 16 = analog, others reserved). `05 79` = DMR_CALL_OPTION and `00 70` = equaliser coefficients (doc names), so
+neither is a vocoder command. The documents list no 4400 bps (IMBE) or 2400 bps-FEC D-STAR rate, only the 3600 bps class.
 
-## 3. Expected replies (AMBE-3000 convention)
+In analog process mode the stock firmware uses 42 for PCM playback, so bits 02 / 40 mean something else there.
 
-* Control: the reply has the same TYPE (0x80). Each field ID is echoed, followed by a status byte (00 = ok). PRODID
-  and VERSTRING reply with the field ID and a NUL-terminated string. GETCFG replies with config bytes.
-* Encode: the MCU sends 0x82 SPCHD, and 20 ms later the chip sends 0x81 `01 <bits> <data>`.
-* Decode: the MCU sends 0x81 CHAND, and the chip sends 0x82 `00 A0 <320 B>`.
-* Unknown: whether the SCT3288 needs a mode command first (`Set_HPIMODE`, `DEBUG_SPEECH_HPI`, or the
-  `00 18 03 xx` loop modes) before 0x81/0x82 packets reach the host port instead of the I2S codec.
-* Unknown: whether `00 18 03 50 00` (MLOOP_VOCODER) is the "PCM from MCU" mode.
+Stock command order the cfw copies (mode 1 = play, mode 5 = record): `01 FF 00`, `19 00`, `18 00 00 00`, gain + codec,
+`1A 02`, `18 03 03 00`, `3E io`; end: `3E 00`, `18 00 00 00`, codec off.
 
-## 4. Emulator model (`emu/models/Baseband.cs`)
+## 3. cfw backend (`hal/voc_sct.c`, `hal/voice.c`)
 
-This is a fake vocoder, deterministic and loopable. It is enough to develop the cfw backend and its framing.
+| Mode | What | IO | Status |
+|---|---|---|---|
+| **A** | TX: mic → chip → frames → MCU (`SCT_ENC_MIC`); RX: frames → chip → speaker (`SCT_DEC`) | 10 / 08 | stock modes 5 and 1 |
+| **B** | TX from MCU PCM (test tone, or when the mic path failed: `SCT_ENC_PCM`) | 90 | guess (80 + 10) |
+| PCM | mic PCM for the software IMBE coder (`SCT_MIC_PCM`); MCU audio to the speaker (`SCT_PLAY_PCM`) | 01 / 80 | stock modes 0xD and 0xF. In mode 0xF the audio may pass through encoder + decoder |
+| **C** | external AMBE packets (80 / 81 / 82), if PRODID answers | - | needs an AMBE chip the radio probably does not have |
+| sine | own test codec, not interoperable | - | fallback |
 
-* `80 30` → `80 30 "SCT3288-EMU" 00` and `80 31` → `80 31 "EMU-FAKE-VOCODER-1" 00`. Set them with
-  `spi2 VocoderProdId "…"` / `spi2 VocoderVersion "…"`.
-* `80 09 21|22` sets 72 or 49 bits and replies `80 09 00`. `80 0A` + 12 B selects 72 bits. Fields 33 34 35 36 05 0B 10
-  are acked with `<id> 00`; GETCFG returns 6 zero bytes. Unknown fields are acked and the rest is skipped.
-* Encode `82 00 n <s16be×n>` → `81 01 <bits> 'F' <freqH> <freqL> <peak/128> 00…` (9 or 7 bytes). The frequency is a
-  big-endian 16-bit value in 0.25 Hz steps, taken from interpolated zero-crossing times. A 440 Hz tone encodes as
-  `06 E0` (= 440.00 Hz), steady from frame to frame.
-* Decode `81 01 <bits> 'F' fH fL a …` → `82 00 A0` + 160 samples of a sine at f/4 Hz with amplitude a×128. The phase
-  carries across frames. Any other channel data decodes to silence.
-* The reply is queued at once (the real chip takes about 20 ms). The frame log is `D890_BB_LOG`, tagged `(vocoder)`.
-* `spi2 FromMcu "84 A9 61 00 01 80 30"` injects MCU bytes, so you can test without MCU code.
-* Stock V1.05 never sends type ≥ 0x80. compare.py still shows identical screens.
+* Probe, once after the baseband is up: `23 32`, `20 10`, `20 1A`, `3E 00`, `80 30`; 200 ms each, nothing blocks. The result
+  shows on the screens behind "BB" / "Baseband" (`voc A`, `voc B no mic`, `voc no RX`, `voc no TX`, `voc failed`,
+  `voc C ext`, `no vocoder`) and, with `DEBUG=1`, on RTT with the answer bytes.
+* A session that does not come up, delivers nothing or takes nothing (800 ms) is closed; after the second time it is not
+  used again until the next start. The backend then takes the next mode.
+* Frames: the chip's 72 bits with FEC ↔ the 49 bits of the protocol glue (`proto/dmr_nxdn/common/ambe_fec.c`). If 8 frames in
+  a row look like raw 49-bit frames the backend switches for receive-from-chip. Gaps and lost frames: the AMBE+2 silence
+  frame `F801A99F8CE080` (= the DMR silence frame `B9E881526173002A6B`, checked with the FEC code).
+* `g_sct_tap` (0 in HW builds): IO 0A instead of 08, so decoded PCM also comes back for the tone meter.
+  `g_sct_force`: 1 chip only, 2 PCM instead of the mic, 3 external AMBE.
+* Start-up fix: the cfw sent `2D` without its codec byte, no codec register 0x0B, and no VOCODER_SEL, then waited for an
+  ID 10 that the chip only sends as the answer to VOCODER_SEL. It now sends the stock values. The emulator had hidden this.
 
-## 5. cfw backend API (proposed)
+### Allow-list (`hal/bb_allow.h`, enforced in `bb_send()` on both radios)
+25 of 65536 TYPE / ID pairs can pass, with checked lengths and values. WORK_MODE passes only idle and `03 03`. Flash, boot,
+program, activation, reset, memory read / write (3F), low power, call and transmit commands, and anything unknown are
+refused and counted (`bb_refused()`). `tools/bb_allow_test.c` runs the whole SCT_Port dictionary through it.
 
-```c
-int  sct_voc_init(uint8_t rate);                 // 80 33 reset; 80 09 rate (33 or 34); returns 0 on "<id> 00"
-int  sct_voc_prodid(char *buf, int n);           // 80 30
-int  sct_voc_encode(const int16_t pcm[160], uint8_t *bits, int *nbits);   // 82 00 A0 … → 81 01 nbits data
-int  sct_voc_decode(const uint8_t *bits, int nbits, int16_t pcm[160]);    // 81 01 nbits data → 82 00 A0 …
-```
+## 4. Mode × chip
 
-Use the stock SPI2 link: frame layout as in §2; CS# PB12; read while PD11 (byte ready) and PD7 (frame pending) are high;
-dummy-write the last TX byte to clock each RX byte (`FUN_0810a674` / `FUN_0810a6dc` / `FUN_08103838`).
+| Mode | Rate | Chip | Evidence | cfw uses |
+|---|---|---|---|---|
+| DMR | AMBE+2 3600x2450 | **confirmed in stock** (frames on SPI in record / play / encryption); cfw use **likely** | section 2 | A / B |
+| NXDN EHR (6.25 / 12.5) | the same | **likely** | same codec and FEC layout (NXDN TS 1-A vectors match `ambe_fec.c`); the chip needs no NXDN modem for it | A / B |
+| YSF DN | the same, own FEC | **likely** | 49-bit frames, FEC changed on the MCU | A / B |
+| P25 Phase 2 | the same, own FEC | **likely** | as YSF DN. Pulls 18 frames at once, about 0.5 s of buffer | A / B |
+| dPMR | the same | **likely** (native mode of the chip, 80 ms packets) | doc | no cfw dPMR |
+| D-STAR | AMBE 3600x2400 | **no** (internal) | VOCODER_SEL has AMBE+2 and analog only (doc). CMODE has an "AMBE compatibility" bit of unknown meaning | C if an external chip answers, else sine |
+| P25 Phase 1, NXDN EFR, YSF VW | IMBE 7200x4400 | **no** | no full-rate mode in any command list (doc, SCT_Port); chip frames are 72 bits | software IMBE; mic and speaker through the chip as PCM |
 
-## 6. What must be measured on a real radio (phase 0)
+## 5. What else the chip offers
 
-No flash writes are needed. Either use the USB passthrough (§1: power on with `#` + PF3 held, then SCT_Port or a
-script on the USB CDC port), or run a RAM stub over SWD.
+| Feature | Command | Used? |
+|---|---|---|
+| Mic / speaker digital gain | 68 / 69 | yes, D168UV stock values (no D890UV calibration to read) |
+| Codec mic gain, speaker attenuation, mute | 40 0F / 10 / 08 | yes; D168UV Vol Level included |
+| Mic PCM to the MCU / MCU PCM to the speaker | 3E 01 / 3E 80 | yes, IMBE modes |
+| VOX energy | 3D | no: both radios have their own VOX path |
+| Audio AGC, equaliser, gain set | 73, 70, 6B | no: stock values come from calibration, fields not understood; wrong values only damage audio |
+| Echo canceller | 80 05 | no: external AMBE chip only |
+| Noise suppression / AGC / tone detect in the vocoder | 02 (CMODE) | no: bit meanings partly guessed; stock values 08, 09, 0B, 18 |
+| Tone and alert generation | 1F (LOCAL_TONE), 08 (VOCODER_TONE) | no: MCU PWM tones already work, and these can reach the transmit path |
+| DTMF / 5-tone / MSK | 0A, 3C, 01 FE, 71, 72 | no: the MCU coders are tested against the stock decoder |
+| Scrambler, AES key load | 2A, 01 FF 83 | no: cfw encryption runs on the MCU and is tested against vectors |
+| dPMR stack, hardware 4FSK modem | 60.., 43, 18 02 | no: transmits on its own (TX line PD6), bypasses the cfw's TX safety; a job for its own hardware session |
+| Codec TI tables (beep, AGC 56) | 40 3C.. | no: codec type 4 is not a TI part as far as known |
 
-1. Send `80 30` and `80 31`. Record the reply bytes. This tells whether the vocoder packet port exists and which
-   strings it returns.
-2. Send `80 09 21`, then one 0x82 SPCHD packet of a 1 kHz tone. Is there a 0x81 reply? How many bits? How long until it
-   arrives? Repeat with `80 09 22` and with the D-STAR RATEP.
-3. If nothing comes back: send `05 A3 00` (Set_HPIMODE) or `00 18 00 00 07` (DEBUG_SPEECH_HPI), then repeat step 2.
-   Also try `00 18 03 50 00` (MLOOP_VOCODER).
-4. Decode: send the 0x81 frames captured in step 2 back to the chip. Is there a 0x82 reply? Does it sound like the
-   tone? Also check whether it plays on the speaker on its own, which would mean the vocoder is wired to I2S only.
-5. Find the frame timing. Can the MCU stream 50 frames per second each way while a DMR call is idle?
-6. Write down every unsolicited frame that appears during a stock DMR RX and TX call. Record over passthrough, with
-   stock firmware.
+## 6. Bench check on a real radio (`make DEBUG=1` only)
+
+Start: RTT key `b`, or `set var g_sct_bench = 1` from the debugger. It sends no transmit command (the allow-list has none),
+does not key the radio, stops when a transmission starts, and logs every frame the chip sends (time, TYPE, ID, bytes).
+
+1. Identity reads, VOCODER_SEL / PROCESS_MODE reads, external PRODID / VERSTRING.
+2. VOCODER_SEL 0C: time to the answer.
+3. Mic → frames, 2 s (speak): packet count and interval, frame length, FEC errors, 72 or 49 bits.
+4. Play the recorded frames, then silence (own voice from the speaker = mode A works).
+5. 1 kHz PCM → encoder → frames (mode B).
+6. Mic PCM, 2 s (peak level). 7. 1 kHz PCM → speaker.
+8. External AMBE: rate 33 and one PCM packet (expected: no answer).
+
+Open questions only the radio answers: whether IO 10 / 08 / 90 / 0A behave outside the stock state machine; pacing (does the ID
+01 / 00 answer mean "next", as stock treats it); start-up delay of a session (cfw queue sizes assume ≤ 100 ms); whether the
+vocoder loop leaks audio to the modulator (scope PB9 / RF chip audio input with the transmitter off); level of mic and speaker
+with these gains; whether FM receive audio is affected by the codec settings; whether the chip needs commands `05 79`
+and `00 70` that stock sends at start-up (not in the allow-list).
+
+## 7. Emulator model (`emu/models/Baseband.cs`, `D168UV/emu/models/Baseband168.cs`)
+
+A stand-in that follows section 2. **It proves framing and flow only, not what the real chip does.**
+
+* Vocoder loop + IO bits, 20 ms clock, 4-frame packets, "next" answers paced by the play-out queue.
+* "Codec": a tone description (`'F'`, frequency in 0.25 Hz, peak / 128) in 49 bits inside the real AMBE+2 72-bit FEC.
+* `spi2 MicHz 700` / `MicAmp` = microphone stand-in (heard only while the cfw has switched the mic on);
+  `spi2 SpeakerFile @out.raw` = what the speaker would play (s16 LE 8 kHz, only while not muted); `spi2 VoiceStatus`.
+* `spi2 VoiceAnswer 0` = chip silent, `2` = refuses IO_SET: fallback tests. `spi2 ExtAmbe true` = the old AMBE-3000 packets
+  (default off now). `spi2 FromMcu "84 A9 61 …"` injects MCU bytes.
+* Tests: `emu/txrx_loop.py --mic` (tone through the mic stand-in), `--speaker` (measure the speaker stand-in, tap off).
+
+## 8. Tests (emulator, 2026-11-24; default build, two cfw radios, 440 Hz)
+
+| Test | D890UV | D168UV |
+|---|---|---|
+| mic stand-in → air → speaker stand-in (`--mic --speaker`, tap off = the HW setting) | DMR, NXDN, YSF DN, P25 Ph2: 440.0 Hz; NXDN96 EFR, P25 Ph1 (IMBE, PCM path): 441.4 Hz; 12 / 12 | the same without NXDN96; 10 / 10 |
+| test tone through PCM → chip (`--mode all --simplex --rf-gate`) | 16 / 16 (FM, all digital modes; D-STAR = sine codec) | 14 / 14 |
+| chip silent / refuses IO_SET, then PTT (`VoiceAnswer 0`, `2`) | no hang, falls back to `sine TEST` on the TX screen | not run (same code) |
+| bench check (DEBUG build) | runs to the end, transmitter off, own voice and 1 kHz tone reach the speaker stand-in | not run (same code) |
+| stock firmware | `compare.py`: 0 of 20480 pixels differ | boots, baseband init complete |
+
+Builds: 8 per radio, no warnings; `make test-libs` passes (with `tools/bb_allow_test.sh`). The CC / NAC / RAN / DG-ID filter cases
+were not repeated. The speaker SNR of the AMBE cases is limited by the stand-in codec.

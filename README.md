@@ -26,7 +26,8 @@ SAMPLES=1 tools/emu_modes.sh   # emulator: every mode decoded by the MCU-DSP dem
 tools/emu_modes.sh        # emulator: play every stream on its built-in channel, montage per mode
 tools/host_decode.sh p25 build_streams/p25_trunk.sym 1   # host: run one proto glue on a stream (fast check)
 tools/efr_loop.sh         # host: NXDN96 EFR + NXDN48/96 encrypted voice through proto_nxdn TX->RX (bit exact)
-make test-libs            # host: dmr_nxdn, p25, dstar_ysf, imbe tests + efr_loop (also in D168UV/cfw)
+make test-libs            # host: dmr_nxdn, p25, dstar_ysf, imbe tests + efr_loop + cfwcp / stockcp host tests (also in D168UV/cfw)
+tools/stock_sections_test.py  # emulator: stock key tables (BP / ARC4 / AES / NX), Radio ID List, caller names, two radios
 python3 tools/emutest.py NAME key:13 pf3 knob:2 shot …   # scripted emulator run + montage
 make emu                  # build + 10 s in Renode
 cd .. && python3 emu/run.py --elf cfw/build/cfw.elf --seconds 10     # screen -> emu/out/cfw/lcd.png
@@ -214,8 +215,8 @@ filters, talkaround (both talkaround → decode, TX-only → decode, RX-only →
 
 ## Digital transmit (2026-11-21) — TEST ONLY, DUMMY LOAD ONLY
 
-PTT in a digital mode now transmits: audio (Menu > Test tone 440 Hz, or silence — the microphone ADC path is not
-mapped) → vocoder → proto TX framing (`app/protos/*`: `tx_start` / `tx_symbols` / `tx_stop`, voice frames pulled with
+PTT in a digital mode now transmits: audio (Menu > Test tone 440 Hz, else the microphone through the SCT3288;
+silence when the chip does not answer) → vocoder → proto TX framing (`app/protos/*`: `tx_start` / `tx_symbols` / `tx_stop`, voice frames pulled with
 `pf->voice_tx`, modem API v3) → `dsp/dsp_mod.c` modulator → TIM4_CH4 PWM on PB9 at 48 kHz, CCR4 from a GPDMA ring on the TIM4 update request
 (`drivers/dac.c`; PB9 = the stock MCU TX audio pin, `docs/AUDIO_PATHS.md`) → RF chip keyed like stock (reg 0x56 = 2, reg 0x52 = 0x3041; release 0x0041 → 0x4041, traced by the
 cfw-emu session; stock never keys with reg 0x30) with the stock APC level on DAC1 ch1 (PA4, stock `FUN_0811a75c` value from the NAND RF calibration block;
@@ -240,10 +241,11 @@ Full host tables (tone, SINAD, frame counts at 40/20/14/10 dB; modulator BER, pe
 | Backend | Codes | Source | Status |
 |---|---|---|---|
 | `imbe` | IMBE 7200x4400, 88-bit (P25 Ph1); auto/2/3 pick it for IMBE | `voc/imbe` (cfw-p25 session: mbelib-compatible dequantisation, own encoder + synthesis) | emulator P25 simplex A→B and B→A: 441.4 Hz, 27 dB SINAD, PASS; mbelib decodes its frames; not tried against a real P25 radio. M33 cost: enc ~269k / dec ~141k instructions per 20 ms frame |
-| `SCT3288` | AMBE+2 49-bit (DMR, NXDN, YSF, P25 Ph2), D-STAR AMBE 72-bit | baseband chip over SPI2: AMBE-3000 packets (`hal/voc_sct.c`, `docs/SCT3288_VOCODER.md`), asynchronous encode-ahead / decode-behind queues | auto picks it when the chip answers PRODID. Only the emulator stand-in (`Baseband.cs`) answers today: its "codec" sends the zero-crossing frequency / 8, so the tone comes back 424-448 Hz with low SINAD — a model property. Chip replies unverified on hardware |
+| `SCT3288` | AMBE+2 49-bit (DMR, NXDN EHR, YSF DN, P25 Ph2) | the baseband chip (`hal/voc_sct.c`, `docs/SCT3288_VOCODER.md`). Mode A: mic → chip → channel frames on SPI2 and frames → chip → speaker, with the commands stock uses for voice record / play; mode B: PCM from the MCU (test tone); for the software IMBE coder the chip gives mic PCM and plays PCM. Mode C: external AMBE packets | auto picks it when the start-up probe is answered (screens: `BB voc A` …), otherwise `sine`. Every command passes the allow-list `hal/bb_allow.h`. Only the emulator stand-in answers today (framing and flow, not audio quality); nothing verified on hardware. No D-STAR (3600x2400) and no full rate in the chip |
 | `sine` | 49-bit / 88-bit payloads | `voc/voc_sine.c` | TEST ONLY - NOT INTEROPERABLE; fallback when neither of the above is there |
 
 No legal open AMBE+2 software encoder exists, so AMBE modes are interoperable only through the SCT3288.
+`make DEBUG=1`: bench check of the chip (RTT key `b` or `g_sct_bench = 1`, receive side only, `docs/SCT3288_VOCODER.md` section 6).
 
 **Safety:** `make HW=1` compiles digital TX out (PTT says `DIGITAL TX OFF`); only `make HW=1 HW_DTX=1` enables it,
 and then only into a dummy load. TX audio leaves on PB9 = TIM4_CH4, the pin the stock firmware plays MDC-style data and
@@ -422,8 +424,10 @@ invalid (CRC) - the radio then falls back to its NAND/built-in channels until th
 
 **SMS / talker alias (DMR):** SMS = unconfirmed rate-1/2 data, SAP 9, payload `CFS\x01` + length + text (64 chars),
 after 3 idle bursts for receiver sync; the cfw's own format, not the AnyTone / Motorola / Hytera SMS formats.
-Talker alias TX: ISO 8-bit alias (codeplug radio name, else the callsign) in the embedded LC of odd superframes
-(FLCO 4..7), the voice LC in even ones; RX decodes 7-bit / ISO 8-bit / UTF-8 / UTF-16 aliases.
+Talker alias TX: codeplug radio name, else the callsign, in the embedded LC of odd superframes (FLCO 4..7), the voice LC
+in even ones; form = stock alias format (ISO 8 bit max 27 chars, ISO 7 bit 31, Unicode = UTF-16BE 13). RX decodes 7-bit /
+ISO 8-bit / UTF-8 / UTF-16. In the 8/16-bit forms the first of the 49 header bits is reserved (from memory of
+TS 102 361-2 7.2.18, no real capture checked); `tools/ta_host_test.py` (in `test-libs`).
 
 **GPS / APRS:** USART2 9600 NMEA ($xxRMC, $xxGGA) by interrupt on both radios (GPS UART pins / power switch not mapped
 for hardware). APRS beacon: AX.25 UI frame `<call>>APZCFW,WIDE1-1:!DDMM.mmN/DDDMM.mmW>cfw <call>`, Bell 202 AFSK
@@ -457,7 +461,7 @@ v0.4 below.)
 | GPS pins | D890UV USART2 PA2/PA3 AF7 pull-down (stock FUN_08063498; FUN_080635c8 is UART4); D168UV PA2 AF / PA3 input pull-down (stock state after boot). v0.5: no power switch exists; stock set-up lines sent | `drivers/gps_uart.c`, D168 `drivers/uart.c` | emulator NMEA model; hardware not tried |
 | APRS receive | AFSK 1200 demodulator on the FM receive audio (8 kHz), DPLL, NRZI, HDLC, FCS; Menu > APRS heard (8 stations, info text) | `app/aprs_rx.c` | `tools/aprs_rx_test.py`: foreign-format packets made in Python + the cfw's own captured beacon |
 | Journal power loss | redo copy in the last 3 codeplug pages, commit record, boot recovery (`cfwcp_recover`); format in `cfw_cps/docs/CODEPLUG.md` | `app/cfwcp.c` | `tools/powercut_test.py`: CPU stopped at every erase / 1 KB program step |
-| Encryption gate | Settings > Encryption, **off by default**; on needs the warning screen (illegal on amateur bands) confirmed. On: DMR AES-256 (cfw privacy scheme) RX+TX, NXDN scrambler / DES-OFB / AES-256-OFB RX+TX on NXDN48 and NXDN96, from codeplug keys. Encrypted TX is refused on amateur allocations (28-29.7, 50-54, 144-148, 219-225, 420-450 MHz): sent in clear, "CLEAR TX" shown | `app/radio.c` `cfw_crypt_*`, `proto_dmr.c`, `proto_nxdn.c`, `ui_menu.c` | `tools/enc_test.py` (DMR), `tools/nxdn_enc_test.py` (NXDN, every rate x cipher): A encrypted, B decodes with key, C (off) muted, ham channel sent clear; `make test-libs` (host) |
+| Encryption gate | Settings > Encryption, **off by default**; on needs the warning screen (illegal on amateur bands) confirmed. On: DMR AES-256 / AES-128 / ARC4-40 / 16-bit BP (cfw privacy schemes; keys also from the stock CPS key tables, `app/stockcp.c`) RX+TX, NXDN scrambler / DES-OFB / AES-256-OFB RX+TX on NXDN48 and NXDN96, from codeplug keys. Encrypted TX is refused on amateur allocations (28-29.7, 50-54, 144-148, 219-225, 420-450 MHz): sent in clear, "CLEAR TX" shown | `app/radio.c` `cfw_crypt_*`, `proto_dmr.c`, `proto_nxdn.c`, `ui_menu.c` | `tools/enc_test.py` (DMR), `tools/nxdn_enc_test.py` (NXDN, every rate x cipher): A encrypted, B decodes with key, C (off) muted, ham channel sent clear; `make test-libs` (host) |
 
 CPS: settings flags b4 (encryption) / b5 (SMS format M-SMS), journal 0xE0 col 6 / 7 (Python + web, `tests/test_journal.py`).
 P25 RX decryption with codeplug keys stays as before (not gated).
@@ -771,13 +775,13 @@ read back byte for byte, power cycle, read again): PASS
 * **Codeplug:** talkgroup contact table, zones, scan lists not decoded; tone table assumed (D878UV).
 * **Digital modes:** RX and TX (TX: dummy load only) are tested on simulated signals and in the emulator, not on a
   radio (ch1 flatness, level and polarity unknown; PB9 PWM filtering / pre-emphasis unknown). Microphone and
-  speaker paths are not mapped (the SCT3288 owns audio in stock). Trunking follows control channels but cannot
+  speaker of the digital modes run through the SCT3288 with stock commands (`docs/SCT3288_VOCODER.md`), unverified on hardware. Trunking follows control channels but cannot
   register / request. YSF VW (IMBE in YSF) is skipped on RX.
 * **ADC at 48 kHz on hardware:** the TIM15-triggered scan + GPDMA ring is written from RM0456 and runs in the emulator
   only as register writes; APRS (stock TIM6 4.8 kHz on the same ADC) is not implemented in cfw.
 * **Settings on hardware:** `make HW=1` keeps everything in RAM; the default build writes the settings page (fine in
   the emulator; on a radio only after the owner OKs flash writes).
-* **Not implemented:** USB CDC programming link (the CPS link uses USART1), GPS (USART2), Bluetooth (UART4), RTC clock display, audio path / vocoders,
+* **Not implemented:** USB CDC programming link (the CPS link uses USART1), GPS (USART2), Bluetooth (UART4), RTC clock display,
   NXDN Type-C trunking in the UI (the library has it).
 
 ## Emulator requests
@@ -794,9 +798,142 @@ No changes were required for milestone 1. Status (2026-11-20): 1, 3 and 4 are do
 above and `emu/README.md`); 2 is open.
 
 1. **Done.** **RF model: carrier / RSSI / squelch.** Let `RfTransceiver.cs` expose a received-signal flag and RSSI register (e.g. `rf0 Signal 146520000 -80`), so the FM squelch/RX indicator and scanning can be tested. Which register the stock firmware reads for RSSI still needs finding (reads of 0x0B–0x0E are the tone scan).
-2. **Open (needs phase 0 of the feasibility doc; `Baseband.cs` belongs to the baseband session).** **Baseband: AMBE packet API.** Once phase 0 of `docs/FEASIBILITY.md` defines the messages, have `Baseband.cs` answer `B0 0x80` PRODID/VERSTRING and loop vocoder packets, so an SCT3288 vocoder backend can be developed.
+2. **Done differently (2026-11-24): the voice interface is commands 01 / 00 / 3E, see `docs/SCT3288_VOCODER.md`.** **Baseband: AMBE packet API.** Once phase 0 of `docs/FEASIBILITY.md` defines the messages, have `Baseband.cs` answer `B0 0x80` PRODID/VERSTRING and loop vocoder packets, so an SCT3288 vocoder backend can be developed.
 3. **Done as a symbol FIFO** (`syms`, `make EMU=1`); ADC sample streams are not modelled (no discriminator DSP in cfw yet). **Symbol injection for MCU-DSP RX.** A way to feed a dibit/bit stream (or discriminator samples into the ADC1 DMA buffer) from a file, e.g. `analog Stream @file.raw 48000`. This would let `proto/*` decoders run against recorded signals inside the firmware.
 4. **Done** (output printed after the run and in `then_out.txt`). **`run.py --seconds` + `--then` quality of life:** print monitor command output (e.g. `sysbus ReadDoubleWord`) into the console log, for checking flash/RAM from scripted runs.
+
+## Stock CPS DMR / NXDN sections (2026-11-23)
+
+`app/stockcp.c` reads the stock CPS data cfw_cps stores in codeplug section 10 (plus the user database, section 16)
+and feeds it to the existing paths; details and the honest limits in `cfw_cps/docs/CODEPLUG.md` "Stock sections used
+by the firmware".
+
+| Stock section | D890UV | D168UV | How |
+|---|---|---|---|
+| Radio ID List (+ channel Radio ID) | used | used | channel's DMR source ID (`radio_chan_cfg`) |
+| Encryption Code (basic privacy) | used (table 37) | used (table 72 `EncryptionCodeRdt`, from the .rdt dialog) | key kind 0 -> DMR_PRIV_CFW_BP |
+| ARC4 / AES Encryption Code | used | used | kinds 1 / 2 / 3 -> DMR_PRIV_CFW_RC4 / _AES128 / _AES256; channel columns pick the key |
+| Digital Contact List | used | used | section 16 -> caller callsign + name on the call screen |
+| Talk Group / Digital Contact Whitelist (Repeater) | stored | n/a | cfw has no cross-band repeater |
+| Friends List | used (table 71) | used (table 71) | Radio extras > Friends: private call target (`app/ui_stock.c`) |
+| NX Setting | used (OwnId, Moni + Moni RAN) | n/a | NXDN unit ID, any-RAN monitor |
+| NX Talk Group | used | n/a | group names, TxForbid refuses TX |
+| NX Receive Group Call List | stored | n/a | cfw has no RX group filter (DMR neither) |
+| NX Encryption Code | used | n/a | kind 7 NXDN scrambler (TS 1-D) |
+| NX State Message | stored | n/a | no NXDN status calls in cfw |
+| NX Digital Contact List | used | n/a | section 16 |
+
+Interop: DMR keys use cfw schemes (stock radios encrypt in the SCT3288, format unknown): cfw <-> cfw only. NXDN
+scrambling is the TS 1-D standard. Tests: `tools/stockcp_host_test.py` (both models, in `make test-libs`),
+`tools/stock_sections_test.py` (emulator, two radios), lib `make test` (dmr_privacy for all four algorithms).
+
+## Stock CPS analog signalling sections (2026-11-23)
+The stock "Analog" lists of both CPS now act (`app/sig.c` lists / TX / alerts / heard list, `app/sig_dec.c` decoders,
+`app/sig_mdc.c` MDC1200 packets; evidence and signal details in `docs/AUDIO_PATHS.md` "Signalling"). QDC1200 (D168UV CPS,
+both radios' menus) is MDC1200: same packet format and the same decoder in both stock firmwares.
+
+| section (D890UV / D168UV CPS) | D890UV | D168UV | what the cfw does |
+|---|---|---|---|
+| DTMF Encode / DTMF Setting | used | used | entries sent from Menu > Signalling; PTT ID = BOT / EOT codes of DTMF Settings; keypad DTMF while PTT is held; RX decode (Goertzel) on DTMF channels, Self ID or own DTMF ID = call |
+| 2Tone Encode / 2Tone Setting | used | used | pair sent with the 2Tone Settings times (default 0.5 + 0.5 s); channel "2TONE Decode" = entry to listen for -> call (alert 3) |
+| 5Tone Encode / 5Tone Setting | used | used | 14 standards, tone time per entry, repeat tone; PTT ID = BOT / EOT of 5Tone Settings; RX decode in the Decode Standard, Self ID (else the channel's 5Tone ID) = call |
+| DTMF / 2Tone / 5Tone Settings, 5Tone Information Codes (.rdt dialogs, tables 65-68) | partly | partly | times, pretimes, Self IDs, decode settings; list of unused keys and assumptions in `docs/AUDIO_PATHS.md` |
+| MDC1200 Encode / QDC1200 Setting | used | used | PTT ID (01 00 start / 01 80 end), call alert + selective call (double packets as stock), radio check, emergency; RX decode, call alert / radio check to own id -> alert 1 (group id: 2) |
+| MDC1200 Address Book / QDC Address Book | used | used | names of decoded units; Menu > Signalling > book entry = call alert |
+| QDC1200 Decode | n/a | used | Self ID private / group = own ids; auto reset, remote listen / kill / monitor, PTT ID lock: stored only |
+| Analog Address Book | used | used | names of decoded DTMF numbers; Menu entry sends the number as DTMF |
+| Alert Tone | used | used | 5 alerts x 5 steps (Hz, 10 ms) on the speaker; 1 individual, 2 group, 3 selective call |
+| Channel: Optional Signal, DTMF/2Tone/5Tone ID, PTT ID, 2TONE Decode, R5toneBot/Eot, Rpga_Mdc | used | used | per FM memory channel (VFO: off); Rpga_Mdc = MDC/QDC encode entry of the channel |
+
+Not done: ACK / Need To Answer (no automatic transmit), remote kill / stun / monitor. Test: `tools/sig_test.py --radio d890|d168
+[--stock-mdc] [--defaults]` (emulator; build `make EMU=1`): D890UV 30/30 PASS incl. the stock V1.05 decoder decoding the cfw's MDC1200
+call alert, D168UV 29/29 PASS, `--defaults` 4/4 on both.
+TX on hardware stays behind the existing gates (FM: `safety_tx_block`; dummy load first).
+
+## Stock CPS common sections: options, hot keys, roaming, FM / AM broadcast, APRS (2026-11-23)
+The stock "Common Settings" / "Public" sections of both CPS now act in the cfw: `app/stockopt.c` (reads them from codeplug
+section 10; list tables are cached in one walk at boot / after a CPS write), `app/stockrun.c` (runtime: rings, TOT
+pre-alert, GPS clock, APRS auto beacon, roaming, hot keys), `app/ui_stock.c` (Menu > Radio extras: FM radio, AM air,
+Roaming, Hot keys, Options (stock), Device info), board drivers `drivers/bcast.c` (D890UV / D168UV). The menu framework
+of `app/ui_menu.c` is open to other UI files through `ui_int.h` (`um_scr_t`, `um_push` / `um_pop` / `um_choose`).
+
+| section | D890UV | D168UV | what the cfw does |
+|---|---|---|---|
+| Optional Settings | used | used | acts on: Step (VFO step), Time Zone (radio clock from GPS time, with Get GPS on), Power-on Interface = Character + both text lines (boot screen), Startup Sound, Default Startup Channel (zone + channel), SMS / Call ring (beep), TOT Predict (popup 10 s before the TX timeout), Menu Exit Time, Auto Repeater A + ranges, AM Offset, auto roaming, FailAlarm / ManDownWait (man down, v0.5). Menu > Radio extras > Options edits them (radio edits journal). More columns: rounds 2 and 3 below; every column with its state and reason: `docs/STOCK_COLUMNS.md` |
+| Pre-defined SMS | used | used | Menu > SMS > Quick texts (v0.3), hot key message content |
+| FM | used | used | Menu > Radio extras > FM radio: memories (+ VFO row), knob tunes 100 kHz, Up/Down memory, * / # volume, Exit stops |
+| AM Air + AM Zone | used | n/a | Menu > Radio extras > AM air: zones -> memories, knob 25 kHz; receive chain as stock (below) |
+| Auto Repeater Offset Frequencies | used | used | VFO: TX = RX +/- the offset of Auto Repeater1 (VHF / UHF) inside the AutoRepFreq ranges (no entry: 600 kHz / 5 MHz) |
+| Device Information | used | used | Menu > Radio extras > Device info: model, firmware, bands, radio ID, callsign, radio name, codeplug generation, locator |
+| Hot Key + Hot Key Quick Call | used | used | long press of digit 1..9 / 0 = hot key 1..10: Menu (SMS, Contact List, Call Log, Zone, Radio Set, ...) opens that menu; Call Digital = contact becomes the TX target (+ Content = a Pre-defined SMS sent to it); Call Analog = Quick Call entry sent as DTMF / 2-tone / 5-tone / MDC (app/sig.c) |
+| Hot Key State | stored | stored | not possible: the NXDN library has no status messages |
+| Roaming Channel / Roaming Zone | used | used | Menu > Radio extras > Roaming: zone pick, Roam now measures each roaming channel on RF chip 0 (carrier + RSSI), the strongest one replaces RX / TX / CC / slot of the current DMR memory channel (not saved); Auto Roaming (TimeRoamOn, start condition Fixed Time, period WanderPerod + 1 min) |
+| GPS Roaming | used | used | every 10 s with a GPS fix: inside an entry's circle (radius m) -> its zone |
+| APRS | used | used | beacon TOCALL + SSID, Your Call Sign + SSID, Digipeater Path (up to 3), symbol table / icon, comment text, Fixed Location Beacon (codeplug position), APRS Auto TX Interval (compiled out of HW=1 builds: no transmission without a key press), Transmission Frequency (beacon on a temporary FM VFO there, then back). Values equal to the stock defaults are not stored by the CPS: the cfw keeps APZCFW / its callsign / WIDE1-1 / "/>" then |
+| Channel columns | used | used | Busy Lock/TX Permit (any value but Always: no TX while the channel is busy; with squelch Off or the monitor open only the carrier counts), PTT Prohibit, Reverse (RX and TX swapped), Correct Frequency[Hz] (added to RX / TX), Exclude channel from roaming |
+| Alarm Setting | used | used | `app/emerg.c` (key function Alarm, Radio extras > Emergency, man down, Work Alone): local alarm; type, times, cycle, channel and DMR target of the transmitted alarm (emulator builds only: HW=1 builds alarm locally); Receive Alarm on DMR emergency calls. Not used: ENI Type / Emergency ID (not decoded), QDC1200 IDs. Any key but PTT cancels |
+| Local Information | n/a | n/a | live radio data (the stock CPS reads it over the COM port); the radio shows its own on Radio extras > Device info |
+| Bluetooth page | partly | partly | module probe, version, name, microphone / speaker gain (round 2 below); no BT audio, BT PTT or pairing |
+| Talk / AIR Alias | used | used | display priority: Off (stock default) / Contact First / Alias First; D890UV TX alias form when `proto_dmr.c` asks for it. D168UV Custom Text: not found |
+
+Per-column list of both radios (state + reason): `docs/STOCK_COLUMNS.md` (written by `tools/stock_columns.py`).
+CPS defaults are not stored in the codeplug: an absent value acts as the stock default (Menu Exit 5 s, UTC-12 time zone,
+orange channel name, FM channels with Squelch Mode CTCSS/DCS). Exception: Step - the cfw's own step (Radio Settings) is
+always stored in the codeplug, so it counts while the stock Step is absent. Without a cfw codeplug the cfw defaults apply.
+
+Round 2 (2026-11-24), `app/stockfx.c`:
+* **Tone squelch** (channel Squelch Mode, receive tone of the channel): CTCSS Goertzel at the tone and its two neighbours
+  (0.25 s blocks) and a 134.4 bit/s DCS decoder (23-bit Golay word, normal / inverted) on the 8 kHz FM audio. FM speaker
+  audio comes from the RF chip, so `radio_tick` now also routes the speaker (`audio_route`) off while the squelch or the
+  tone squelch is closed; before, hardware FM audio did not follow the cfw squelch at all.
+* Digi / Ana idle tone, TBST (Up key while PTT on FM), VFO scan (VFO Scan Type and range, Menu > Scan in VFO mode), Auto Scan
+  (channel), AM/FM Function at power on, FM Monitor, channel / standby colour, power-on password (digits, also blocks TX), VOX
+  Delay, Filter Own ID, Auto Repeater2, Send Talker Alias, DMR MODE (TDMA direct), Analog APRS PTT Mode End (not in HW=1),
+  NOAA weather receive (7 channels, 1050 Hz alert popup), Bluetooth module probe + gains (`drivers/bt.c` D168UV AT text,
+  `drivers/btmod.c` D890UV AT text in frames of command 0x10; no BT audio, no BT PTT).
+* Not done: NXDN status / Hot Key State (the NXDN library has no STAT messages).
+
+Round 3 (2026-11-24), the .rdt-only dialogs (codeplug tables 64-72): `app/stockdlg.c` = cached reader
+(`stockdlg_num` / `_text` / `_rows` / `_row_text`; absent = stock default), `app/emerg.c` = emergency alarm + Work Alone.
+* The meaning of the alarm types (who hears the tone, when the microphone is open) is read from the stock texts, not measured.
+* `proto_dmr.c` sets / reports the DMR emergency bit (Service Options 0x80) and takes the TX alias form from `stockdlg.c`.
+* A codeplug with no AIR / Talk Alias entry hides received aliases: the stock default is Off.
+* Alias display order read in both stock CPS dropdowns (Off / No Display, Contact, Air Alias). D168UV Custom Text: no text field found in the stock CPS.
+
+### Battery percentage (2026-11-24)
+Settings > Battery = Icon (default) / Percent (`app/battdisp.c`; codeplug settings flag b6, radio edits journal table 0xE0 col 10; no
+stock column means this). With Percent the status bar shows e.g. "87%" in place of the icon, in the icon's colours (red at 0 %,
+orange below 6.55 V, else green); the volts left of it give way when other status text needs the room. The Info screen shows
+volts and percent. Value: smoothed voltage (3.2 s), held during TX and 5 s after it, moves at most 1 % per second and only when a whole
+percent away. Curve `CFW_BATT_CURVE` (`app/battdisp.h`, a board may override it), same for both radios: the stock firmware gives the
+voltages 6.01 V (low limit) and 6.45 / 6.85 / 7.45 V (icon steps, same table in V1.05 and V1.07); it has no percentage, so every
+percent value and the voltages 7.20 V and 7.70 V up are assumed. The voltage calibration of the stock settings is not applied (cal = 100).
+Test: `tools/battery_test.py --radio d890|d168`: 14/14 PASS on both radios (emulator, 2026-11-24); screenshots `screens/battery_percent.png`.
+
+Broadcast receive chain (stock V1.05 / V1.07 traced, register sequences in `drivers/bcast.c`):
+* D890UV: AM/FM receiver IC at I2C 0x35 (8-bit 0x6A / 0x6B), registers read-modify-written as the stock shadows do.
+  FM: the IC tunes 64-108 MHz (channel = f / 50 kHz). AM air band: RF chip 1 is the down-converter: GPIO pins 5, 7, 4 of
+  its reg 0x52 on, reg 0x56 = 6, reg 0x5C = 2, frequency = air band frequency +/- 2.925 MHz (stock AM Offset); the IC in
+  AM mode tunes the 2.925 MHz IF. The emulator's I2C model now answers at 0x35 (`i2c KtStatus`).
+* D168UV: FM receiver at I2C 0x10 (RDA5807-style, regs 0x02..0x05 in one write, 76-108 MHz, 50 kHz steps). No AM.
+* The receivers' audio path to the speaker is not traced; the cfw selects AUDIO_RF. Unverified on hardware.
+
+Not tested: AM receive audio, Bluetooth beyond the module probe, VOX delay, DMR MODE, MissCallFilter, the idle tone after a digital
+call, and everything on hardware. Read from the stock code, not
+guessed any more: Step (V1.05 table 0x0814A520, 2.5K first), time zones (D890UV 34 entries, D168UV 32), VOX delay, colours, STE, TBST.
+Still inferred: Auto Repeater list index (1-based), GPS Roaming minutes, NOAA channel numbering, the idle tone pitches, the RF
+chip 1 pin meanings of the AM path. Auto Roaming "Out of Range" is not implemented.
+
+Found by these tests and fixed (2026-11-24): Busy Lock refused every transmission with squelch Off (the open squelch counted as
+a busy channel; now only the carrier counts then); the first private call after power on did not ring (empty call log).
+
+Test results (emulator, made-up codeplug, 2026-11-24):
+* `tools/stockopt_test.py`: D890UV 25/25, D168UV 23/23. `tools/stockfx_test.py`, all runs (tone, noaa, tbst, misc, scan, lock, bt, absent,
+  rpt2, aprs, emerg, emgrx, ring, alone, roam): PASS on both radios (run in parts on the builds of that day; `ring` and stockopt on
+  the last one before the battery percent was added).
+* features, sql, aprs, aprs_rx, sms_alias (both SMS formats), hwpaths, cal_crc, preflash 9/9, powercut 14/14, enc, nxdn_enc, sig 29/29,
+  stock_sections: PASS on both radios. `emu/compare.py --seconds 15` (stock against the lifted build, real NAND image): screens identical.
+* The two-radio matrices (`emu/txrx_loop.py`) are run and reported separately.
 
 ## Repository layout
 

@@ -14,3 +14,5 @@ __attribute__((weak)) bool cfw_crypt_tx(uint8_t lo, uint8_t hi, uint8_t *kind, u
     return false;
 }
 __attribute__((weak)) uint32_t cfw_crypt_iv(void) { return 0x5EED1234u; }
+__attribute__((weak)) bool cfw_nxdn_any_ran(void) { return false; }
+__attribute__((weak)) bool cfw_nxdn_tx_forbidden(uint32_t group) { (void)group; return false; }

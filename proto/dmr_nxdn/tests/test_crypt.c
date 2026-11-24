@@ -630,15 +630,27 @@ static unsigned g_sn;
 static void sput(const uint8_t *d, unsigned n) { memcpy(g_s + g_sn, d, n); g_sn += n; }
 static void snoise(unsigned n) { for (unsigned i = 0; i < n; i++) g_s[g_sn++] = (uint8_t)(trand() & 3u); }
 
-static void dmr_privacy(void)
+/* RX keyring: one key per cfw algorithm (ids > 15 check the late-entry 4-bit key id), plus a same-id decoy of
+ * another algorithm; tx = the key the sender uses (index into the ring) */
+static void dmr_ring(dmr_keyring_t *kr)
+{
+    static const uint8_t alg[5] = { DMR_PRIV_CFW_AES256, DMR_PRIV_CFW_AES128, DMR_PRIV_CFW_RC4, DMR_PRIV_CFW_BP,
+                                    DMR_PRIV_CFW_AES128 };
+    static const uint8_t kid[5] = { 7, 18, 3, 31, 7 };
+    memset(kr, 0, sizeof *kr);
+    for (int k = 0; k < 5; k++) {
+        kr->k[k].alg = alg[k]; kr->k[k].key_id = kid[k];
+        for (int i = 0; i < 32; i++) kr->k[k].key[i] = (uint8_t)(0xA0 + 17 * k + i);
+    }
+    kr->n = 5;
+}
+
+static void dmr_privacy(int tx)
 {
     dmr_keyring_t kr;
-    memset(&kr, 0, sizeof kr);
-    kr.k[0].alg = DMR_PRIV_CFW_AES256; kr.k[0].key_id = 7;
-    for (int i = 0; i < 32; i++) kr.k[0].key[i] = (uint8_t)(0xA0 + i);
-    kr.n = 1;
+    dmr_ring(&kr);
     dmr_priv_t tp;
-    CHECK_EQ(dmr_priv_setup(&tp, &kr.k[0]), 0);
+    CHECK_EQ(dmr_priv_setup(&tp, &kr.k[tx]), 0);
     dmr_priv_sync(&tp, 0xDEADBEEF, 0);
     dmr_lc_t lc;
     dmr_lc_make_voice(&lc, true, 91, 2001, 0);
@@ -672,9 +684,10 @@ static void dmr_privacy(void)
         dmr_rx_cfg_t cfg = { 4, -1, false };
         dmr_cb_t cb = { d_voice, d_event, &r };
         dmr_rx_init(&rx, &cfg, &cb);
-        dmr_keyring_t empty;
-        memset(&empty, 0, sizeof empty);
-        rx.keys = mode == 1 ? &empty : &kr;
+        dmr_keyring_t other;               /* mode 1: same alg + key id, different key bytes */
+        other = kr;
+        for (int i = 0; i < 32; i++) other.k[tx].key[i] ^= 0x5A;
+        rx.keys = mode == 1 ? &other : &kr;
         unsigned from = mode == 2 ? late_start - 12 : 0;
         dmr_rx_dibits(&rx, g_s + from, g_sn - from);
         int dec = 0, enc = 0, same = 0;
@@ -689,9 +702,8 @@ static void dmr_privacy(void)
             CHECK(r.ev[DMR_EV_PRIVACY] >= 1);
             CHECK_EQ(r.last[DMR_EV_PRIVACY].priv.iv, 0xDEADBEEF);
             CHECK_EQ(r.last[DMR_EV_VOICE_START].lc.svc_opts & 0x40, 0x40);
-        } else if (mode == 1) {
-            CHECK_EQ(r.n, 72); CHECK_EQ(enc, 72); CHECK(same < 2);
-            CHECK_EQ(r.last[DMR_EV_PRIVACY].crypt, DMR_CRYPT_ENCRYPTED);
+        } else if (mode == 1) {                /* wrong key: "decrypted" with the wrong keystream = noise */
+            CHECK_EQ(r.n, 72); CHECK(same < 2);
         } else {
             /* superframe 1 (odd) carries the privacy LC: complete at burst E, burst F onwards decrypted */
             /* the 15 frames before it cannot be recognised as encrypted (no header seen): marked clear */
@@ -733,6 +745,48 @@ static void dmr_privacy(void)
     dmr_priv_wipe(&tp);
 }
 
+static void dmr_privacy_algs(void)
+{
+    /* key lengths, bad lengths refused */
+    dmr_key_t k;
+    dmr_priv_t p;
+    memset(&k, 0, sizeof k);
+    k.alg = DMR_PRIV_CFW_RC4; k.len = 4; CHECK(dmr_priv_setup(&p, &k) < 0);
+    k.len = 5; CHECK_EQ(dmr_priv_setup(&p, &k), 0);
+    k.alg = DMR_PRIV_CFW_AES128; k.len = 32; CHECK(dmr_priv_setup(&p, &k) < 0);
+    k.alg = 9; k.len = 0; CHECK(dmr_priv_setup(&p, &k) < 0);
+    /* keystreams of the algorithms differ for the same key bytes / IV, and are stable per (IV, sf, offset) */
+    uint8_t ks[5][18], a[9], b[9];
+    static const uint8_t algs[4] = { DMR_PRIV_CFW_AES256, DMR_PRIV_CFW_AES128, DMR_PRIV_CFW_RC4, DMR_PRIV_CFW_BP };
+    for (int i = 0; i < 4; i++) {
+        memset(&k, 0, sizeof k);
+        k.alg = algs[i]; k.key_id = 1;
+        for (int j = 0; j < 32; j++) k.key[j] = (uint8_t)j;
+        CHECK_EQ(dmr_priv_setup(&p, &k), 0);
+        dmr_priv_sync(&p, 0x11223344, 5);
+        memset(ks[i], 0, 18);
+        dmr_priv_voice(&p, 1, 2, ks[i]);
+        dmr_priv_voice(&p, 2, 0, ks[i] + 9);
+        CHECK(memcmp(ks[i], ks[i] + 9, 9) != 0);
+        memset(a, 0, 9); memset(b, 0, 9);
+        dmr_priv_voice(&p, 1, 2, a);
+        dmr_priv_sync(&p, 0x11223344, 6);
+        dmr_priv_voice(&p, 1, 2, b);
+        CHECK(!memcmp(a, ks[i], 9));            /* same position, same keystream */
+        CHECK(memcmp(a, b, 9) != 0);            /* next superframe: new keystream */
+        for (int j = 0; j < i; j++) CHECK(memcmp(ks[i], ks[j], 9) != 0);
+        dmr_priv_wipe(&p);
+    }
+    /* BP: only the first 2 key bytes count */
+    memset(&k, 0, sizeof k);
+    k.alg = DMR_PRIV_CFW_BP; k.key[0] = 0x12; k.key[1] = 0x34;
+    dmr_priv_setup(&p, &k); dmr_priv_sync(&p, 1, 0); memset(a, 0, 9); dmr_priv_voice(&p, 0, 0, a);
+    k.key[5] = 0x77;
+    dmr_priv_setup(&p, &k); dmr_priv_sync(&p, 1, 0); memset(b, 0, 9); dmr_priv_voice(&p, 0, 0, b);
+    CHECK(!memcmp(a, b, 9));
+    dmr_priv_wipe(&p);
+}
+
 void test_crypt(void)
 {
     test_primitives();
@@ -750,5 +804,6 @@ void test_crypt(void)
     for (int ran = 1; ran < 64; ran++)
         for (int efr = 0; efr < 2; efr++) nxdn_vtx_call(1, true, efr, ran);
     dmr_auth();
-    dmr_privacy();
+    dmr_privacy_algs();
+    for (int tx = 0; tx < 5; tx++) dmr_privacy(tx);
 }

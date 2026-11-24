@@ -3,6 +3,7 @@
 #include "hal.h"
 #include "gfx.h"
 #include "aprs.h"
+#include "stockopt.h"
 
 static volatile uint8_t s_rx[512];
 static volatile uint16_t s_wr, s_rd;
@@ -136,8 +137,18 @@ uint32_t gps_beacons(void) { return s_beacons; }
 
 const char *gps_beacon_now(void)
 {
+    const so_aprs_t *a = stockopt_aprs();
+    const char *e;
+    if(a->fixed) {                                   /* stock APRS Fixed Location Beacon: the codeplug position */
+        gps_fix_t f;
+        memset(&f, 0, sizeof f);
+        f.valid = true; f.lat_e7 = a->lat_e7; f.lon_e7 = a->lon_e7;
+        e = aprs_send_position(&f);
+        if(!e) { s_beacons++; }
+        return e;
+    }
     if(!gps_fix()->valid) { return "no GPS fix"; }
-    const char *e = aprs_send_position(&s_fix);
+    e = aprs_send_position(&s_fix);
     if(!e) { s_beacons++; }
     return e;
 }

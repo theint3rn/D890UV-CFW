@@ -16,6 +16,7 @@
 #include "channels.h"
 #include "hal.h"
 #include "cfwcp.h"
+#include "stockopt.h"
 #include "rset.h"
 
 #ifndef CFW_NAND_CODEPLUG
@@ -167,7 +168,7 @@ bool channel_load(int i, channel_t *out)
     for(int k = 0; k < s_novr; k++) {
         if(s_ovr[k].index == i) { *out = s_ovr[k].ch; goto power; }
     }
-    if(i < s_ncp) { if(s_cfwcp) { cfwcp_channel(i, out); } else { load_codeplug(s_cp[i], out); } }
+    if(i < s_ncp) { if(s_cfwcp) { cfwcp_channel(i, out); stockopt_channel_apply(i, out); } else { load_codeplug(s_cp[i], out); } }
     else { *out = k_builtin[i - s_ncp]; out->src = CH_SRC_BUILTIN; out->scanlist = 0xFF; }
 power:
     rset_channel_power(i, &out->power);           /* TX power edited in the radio menu (codeplug journal) */

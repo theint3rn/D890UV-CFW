@@ -10,6 +10,7 @@
 #include "ui.h"
 #include "prog.h"
 #include "radio.h"
+#include "stockcp.h"
 #include "gfx.h"
 #include "hal.h"
 #include "modem_core.h"
@@ -17,11 +18,18 @@
 #include "voice.h"
 #include "ui_int.h"
 #include "rset.h"
+#include "battdisp.h"
+#include "stockopt.h"
+#include "stockrun.h"
+#include "stockfx.h"
 #include "spk.h"
 #include "mandown.h"
+#include "emerg.h"
+#include "stockdlg.h"
 #include "scan.h"
 #include "calllog.h"
 #include "gps.h"
+#include "sig.h"
 
 #ifndef VERSION
 #define VERSION "?"                     /* Makefile: CFW_VER */
@@ -51,7 +59,7 @@
 #define CFW_ADC_TEMP_SLOT 4
 #endif
 
-enum { SCR_BOOT, SCR_MAIN, SCR_MENU, SCR_MODE, SCR_EDIT, SCR_INFO };   /* SCR_MENU = ui_menu.c */
+enum { SCR_BOOT, SCR_MAIN, SCR_MENU, SCR_MODE, SCR_EDIT, SCR_INFO, SCR_LOCK };   /* SCR_MENU = ui_menu.c */
 static int s_screen = SCR_BOOT;
 static uint32_t s_boot_until;
 static int s_mode_sel;
@@ -355,17 +363,30 @@ static void field_back(field_t *f)
 }
 
 /* ------------------------------------------------------------------ drawing */
-static void draw_battery(int x, int y)
+/* left_end = end of the status bar text left of the battery: with Percent the volts give way to it */
+static void draw_battery(int x, int y, int left_end)
 {
     uint16_t cv = battery_centivolts();
     bool low = cv < BATTERY_LOW_CV;
     int lvl = cv <= 600 ? 0 : cv >= 820 ? 4 : (cv - 600) * 4 / 220 + 1;   /* 7.4 V pack: 6.0 .. 8.2 V */
     if(lvl > 4) { lvl = 4; }
     uint16_t col = low ? C_RED : (lvl <= 1 ? C_ORANGE : C_GREEN);
-    gfx_frame(x, y, 15, 8, C_WHITE);
-    gfx_rect(x + 15, y + 2, 2, 4, C_WHITE);
-    for(int i = 0; i < 4; i++) { gfx_rect(x + 2 + i * 3, y + 2, 2, 4, i < lvl ? col : C_DGREY); }
     char t[8], *p = t;
+    if(rset_batt_percent()) {                  /* same colour steps as the icon, from the shown (steady) percentage */
+        int pc = battdisp_percent();
+        col = pc <= 0 ? C_RED : pc * 10 < (int)battdisp_curve_x10(655u * BATT_Q) ? C_ORANGE : C_GREEN;
+        if(pc < 0) { p = fmt_s(p, "--"); col = C_GREY; } else { p = fmt_u(p, (uint32_t)pc, 1); }
+        fmt_s(p, "%");
+        gfx_text(LCD_W - 1 - gfx_text_width(t, 1), y, t, col, C_BLUE, 1);
+        cv = battdisp_centivolts();
+        low = pc == 0;
+        if(left_end + 2 > x - 6 * 4 - 2) { return; }        /* 2 px gap */
+    } else {
+        gfx_frame(x, y, 15, 8, C_WHITE);
+        gfx_rect(x + 15, y + 2, 2, 4, C_WHITE);
+        for(int i = 0; i < 4; i++) { gfx_rect(x + 2 + i * 3, y + 2, 2, 4, i < lvl ? col : C_DGREY); }
+    }
+    p = t;
     p = fmt_u(p, cv / 100u, 1); *p++ = '.'; fmt_u(p, (cv % 100u) / 10u, 1);
     gfx_text(x - 6 * 4 - 2, y, t, low ? C_RED : C_WHITE, C_BLUE, 1);
 }
@@ -400,13 +421,13 @@ static void draw_status_bar(void)
     if(scan_active()) { x = gfx_text(x, 2, scan_holding() ? "SCN" : "SCAN", C_YELLOW, C_BLUE, 1) + 3; }
     else if(g_radio.monitor) { x = gfx_text(x, 2, "MON", C_GREEN, C_BLUE, 1) + 3; }
     if(sms_unread()) { gfx_rect(x, 3, 9, 6, C_WHITE); gfx_frame(x, 3, 9, 6, C_BLUE); x += 12; }
-    if(!s_locked && !scan_active() && !g_radio.monitor && !bb_ready() && x < LCD_W - 70) { gfx_text(x, 2, "BB", C_GREY, C_BLUE, 1); }
+    if(!s_locked && !scan_active() && !g_radio.monitor && !bb_ready() && x < LCD_W - 70) { x = gfx_text(x, 2, "BB", C_GREY, C_BLUE, 1); }
     if(rset_get(RS_TIMEDISP) && rtc_now() && LCD_W >= 160) {
         char t[8];
         ui_fmt_time(t, rtc_now(), false);
         gfx_text(LCD_W - 19 - 26 - 33, 2, t, C_WHITE, C_BLUE, 1);
     }
-    draw_battery(LCD_W - 19, 2);
+    draw_battery(LCD_W - 19, 2, x - 3);
 }
 
 static void draw_digital(const channel_t *c)
@@ -421,7 +442,7 @@ static void draw_digital(const channel_t *c)
             gfx_text(4, 90, t, C_ORANGE, C_BLACK, 1);
         }
         p = fmt_s(t, "audio: ");
-        if(voice_test_tone()) { fmt_s(fmt_u(p, voice_test_tone(), 1), " Hz tone"); } else { fmt_s(p, "silence (no mic)"); }
+        if(voice_test_tone()) { fmt_s(fmt_u(p, voice_test_tone(), 1), " Hz tone"); } else { fmt_s(p, voice_tx_source()); }
         gfx_text(4, 99, t, C_WHITE, C_BLACK, 1);
         p = fmt_s(t, CFW_TXT_DAC); fmt_s(p, dspb_tx_dac_moving() ? "DMA" : "timed (no DAC)");
         gfx_text(4, 108, t, C_GREY, C_BLACK, 1);
@@ -442,7 +463,12 @@ static void draw_digital(const channel_t *c)
     char s[96];
     modem_status(s, sizeof s);
     const cfw_call_info_t *ci = modem_call_info();
-    if(ci->alias[0]) {                                   /* DMR talker alias: replaces the third status line */
+    /* stock Talk / AIR Alias display priority (app/stockdlg.c): off, contact first, alias first */
+    uint8_t ap = stockdlg_alias_prio();
+    char cnm[28];
+    bool contact = (ci->src_id || ci->dst_id) && (ap == TA_PRIO_CONTACT || !ci->alias[0] || ap == TA_PRIO_OFF) &&
+                   stockcp_call_line((uint8_t)c->mode, ci->src_id, ci->dst_id, ci->private_call, cnm, sizeof cnm);
+    if(ci->alias[0] && ap != TA_PRIO_OFF && !contact) {  /* DMR talker alias: replaces the third status line */
         char *nl = strchr(s, '\n');
         if(nl) { nl = strchr(nl + 1, '\n'); }
         if(!nl) { nl = s + strlen(s); }
@@ -450,6 +476,16 @@ static void draw_digital(const channel_t *c)
         fmt_s(fmt_s(a, "\nTA "), ci->alias);
         a[30] = 0;
         if((size_t)(nl - s) + strlen(a) < sizeof s) { strcpy(nl, a); }
+    } else if(contact) {                                 /* name from the user database / contacts (stockcp.c) */
+        char a[40];
+        {
+            char *nl = strchr(s, '\n');
+            if(nl) { nl = strchr(nl + 1, '\n'); }
+            if(!nl) { nl = s + strlen(s); }
+            fmt_s(fmt_s(a, "\n"), cnm);
+            a[30] = 0;
+            if((size_t)(nl - s) + strlen(a) < sizeof s) { strcpy(nl, a); }
+        }
     }
     int y = 81;
     char *line = s;
@@ -499,7 +535,7 @@ static void draw_main(void)
         gfx_text(4, 15, t, C_YELLOW, C_BLACK, 1);
     } else {
         p = fmt_u(t, (uint32_t)g_radio.channel + 1, 3); *p++ = ' '; fmt_s(p, c->name);
-        gfx_text(4, 15, t, C_CYAN, C_BLACK, 1);
+        gfx_text(4, 15, t, stockfx_color(0), C_BLACK, 1);
         if(c->src == CH_SRC_CODEPLUG) { gfx_text(LCD_W - 10, 15, "C", C_GREY, C_BLACK, 1); }
     }
 
@@ -514,7 +550,7 @@ static void draw_main(void)
         gfx_text((LCD_W - gfx_text_width(t, 2)) / 2, 28, t, C_YELLOW, C_BLACK, 2);
     } else {
         fmt_freq(t, g_radio.tx ? radio_tx_hz(c) : c->rx_hz);
-        gfx_text((LCD_W - gfx_text_width(t, 2)) / 2, 28, t, g_radio.tx ? C_RED : C_WHITE, C_BLACK, 2);
+        gfx_text((LCD_W - gfx_text_width(t, 2)) / 2, 28, t, g_radio.tx ? C_RED : stockfx_color(1), C_BLACK, 2);
     }
 
     /* RX/TX + channel details */
@@ -687,8 +723,10 @@ static void draw_info(void)
     p = fmt_s(t, "BB "); p = fmt_s(p, bb_status());
     if(bb_ready()) { p = fmt_s(p, " "); const uint8_t *v = bb_version(); for(int i = 3; i < 8; i++) { p = fmt_hex(p, v[i], 2); } }
     gfx_text(4, y, t, C_WHITE, C_BLACK, 1); y += 9;
-    p = fmt_s(t, "Batt "); p = fmt_u(p, battery_raw(1), 1); p = fmt_s(p, " T "); p = fmt_u(p, battery_raw(CFW_ADC_TEMP_SLOT), 1);
-    p = fmt_s(p, " Dec "); fmt_u(p, (uint32_t)modem_proto_count(), 1);
+    uint16_t bv = battery_centivolts();
+    p = fmt_s(t, "Bat "); p = fmt_u(p, bv / 100u, 1); *p++ = '.'; p = fmt_u(p, bv % 100u, 2); p = fmt_s(p, "V ");
+    if(battdisp_percent() >= 0) { p = fmt_u(p, (uint32_t)battdisp_percent(), 1); p = fmt_s(p, "%"); }
+    p = fmt_s(p, " T"); fmt_u(p, battery_raw(CFW_ADC_TEMP_SLOT), 1);
     gfx_text(4, y, t, C_WHITE, C_BLACK, 1); y += 9;
     if(g_cal_info.copy) {                      /* RF calibration copy in use + CRC (docs/CALIBRATION.md section 3) */
         p = fmt_s(t, "Cal "); *p++ = g_cal_info.copy; *p++ = ' '; p = fmt_hex(p, g_cal_info.crc, 8);
@@ -737,6 +775,11 @@ static void draw_boot(void)
     gfx_text(10, y, t, C_WHITE, C_BLACK, 1); y += 10;
     if(g_clk_err) { gfx_text(10, y, "CLK ERR: internal clock, no TX", C_RED, C_BLACK, 1); y += 10; }
     if(s_fault[0][0]) { gfx_text(10, y, s_fault[0], C_RED, C_BLACK, 1); y += 10; }
+    char l1[17], l2[17];                       /* stock Power-on Interface = Character: the CPS text lines */
+    if(stockopt_boot_text(l1, l2)) {
+        if(l1[0]) { gfx_text_center(LCD_H - 22, l1, C_YELLOW, C_BLACK, 1); }
+        if(l2[0]) { gfx_text_center(LCD_H - 12, l2, C_YELLOW, C_BLACK, 1); }
+    }
 }
 
 /* after a fault reset (hal/safety.c): shown on the boot screen and once as a popup on the main screen */
@@ -830,6 +873,7 @@ void ui_keyfn(uint8_t fn)
         break;
     }
     case KF_CALL_LOG: um_open(UM_CALLLOG); s_screen = SCR_MENU; break;
+    case KF_ALARM: emerg_start("ALARM KEY", true); break;
     case KF_GPS_INFO: um_open(UM_GPS); s_screen = SCR_MENU; break;
     default: break;
     }
@@ -858,6 +902,16 @@ static void main_key(int k)
     if(s_locked) { return; }
     int slot = key_slot(code, lng);
     if(slot >= 0) { ui_keyfn(rset_key(slot)); return; }
+    if(lng && code >= KEY_0 && code <= KEY_9) {             /* stock Hot Key (app/stockrun.c) */
+        const char *l1, *l2;
+        int um = stockrun_hotkey(code - KEY_0, &l1, &l2);
+        if(um != -2) {
+            s_entry_n = 0;                                    /* the press already typed the digit */
+            if(um >= 0) { s_screen = SCR_MENU; um_open(um); }
+            else if(l1[0]) { popup(l1, l2, C_CYAN); }
+            return;
+        }
+    }
     if(lng) {
         if(code == KEY_P1) { ui_show_mode_picker(); }      /* P1 (D168UV: PF1) long: mode list */
         return;
@@ -931,6 +985,13 @@ void ui_key(int k)
         backlight_set((uint8_t)(rset_get(RS_BKL) + 1u));
         if((k & 0x3F) != KEY_PTT) { return; }
     }
+    if(s_screen == SCR_LOCK) {
+        int c = k & 0x3F;
+        if(k & (KEY_RELEASED | KEY_LONG)) { return; }
+        stockfx_lock_key(c >= KEY_0 && c <= KEY_9 ? c - KEY_0 : -1, c == KEY_MENU || c == KEY_HASH, c == KEY_EXIT || c == KEY_STAR);
+        if(!stockfx_locked()) { s_screen = SCR_MAIN; }
+        return;
+    }
     if((k & 0x3F) == KEY_PTT) {
         radio_ptt(!(k & KEY_RELEASED));
         const channel_t *c = radio_current();
@@ -950,6 +1011,18 @@ void ui_key(int k)
         if(!(k & (KEY_RELEASED | KEY_LONG))) { mandown_cancel(); spk_stop(); popup("MAN DOWN", "silenced", C_ORANGE); }
         return;
     }
+    if(!(k & (KEY_RELEASED | KEY_LONG))) {
+        bool w = emerg_warning();
+        emerg_key();
+        if(emerg_active()) { emerg_cancel(); popup("EMERGENCY", "cancelled", C_GREEN); return; }
+        if(w && !emerg_warning()) { spk_stop(); popup("WORK ALONE", "response ok", C_GREEN); return; }
+    }
+    if(g_radio.tx && !(k & (KEY_RELEASED | KEY_LONG)) && radio_current()->mode == CFW_MODE_FM) {
+        int c = k & 0x3F;                                     /* FM TX: keypad sends DTMF (app/sig.c) */
+        char d = c >= KEY_0 && c <= KEY_9 ? (char)('0' + c - KEY_0) : c == KEY_STAR ? '*' : c == KEY_HASH ? '#' : 0;
+        if(d) { sig_dtmf_key(d); return; }
+        if(c == KEY_UP && stockfx_tbst()) { popup("TBST", "repeater access tone", C_CYAN); return; }
+    }
     if(!(k & (KEY_RELEASED | KEY_LONG))) { spk_key(); }     /* Key beep */
     if(s_screen == SCR_MAIN) { main_key(k); return; }
     if(k & (KEY_RELEASED | KEY_LONG)) { return; }
@@ -965,7 +1038,7 @@ void ui_draw(void)
 {
     if(prog_active()) { prog_draw(); return; }      /* CPS program mode screen */
     if(s_screen == SCR_BOOT && (int32_t)(hal_millis() - s_boot_until) >= 0 && power_armed()) {
-        s_screen = SCR_MAIN;
+        s_screen = stockfx_locked() ? SCR_LOCK : SCR_MAIN;
     }
     uint32_t now = hal_millis();
     if(s_screen != SCR_BOOT) {
@@ -974,6 +1047,9 @@ void ui_draw(void)
         if(rset_get(RS_KEYLOCK) && !s_locked && s_screen == SCR_MAIN && now - s_last_key >= 10000u) {
             s_locked = true;                         /* Key lock: Auto */
         }
+        uint32_t mx = stockopt_menu_exit_s();     /* stock Menu Exit Time */
+        if(mx && s_screen != SCR_MAIN && s_screen != SCR_LOCK && !g_radio.tx && now - s_last_key >= mx * 1000u) { s_screen = SCR_MAIN; }
+        if(s_screen != SCR_LOCK && stockfx_locked()) { s_screen = SCR_LOCK; }
         uint32_t apo = rset_apo_s();
         if(apo && !g_radio.tx && now - g_radio.last_activity >= apo * 1000u) { power_off(); }
         if(g_radio.tot_hit && !s_tot_shown) { popup("TX TIMEOUT", "release PTT", C_RED); }
@@ -987,6 +1063,11 @@ void ui_draw(void)
         } else if(g_radio.tx_note_seq != s_note_seq && (int32_t)(now - s_fault_pop_end) >= 0) {
             s_note_seq = g_radio.tx_note_seq;               /* TX refused / stopped (hal/safety.c) */
             popup(g_radio.tx_note[0], g_radio.tx_note[1], C_RED);
+        } else {
+            static uint8_t s_sig_seq;                       /* analog signalling decoded (app/sig.c) */
+            const char *l1, *l2;
+            uint8_t q = sig_note(&l1, &l2);
+            if(q != s_sig_seq) { s_sig_seq = q; popup(l1, l2, C_CYAN); }
         }
     }
     if(s_entry_n && hal_millis() - s_entry_t > (g_radio.vfo ? 5000u : 2500u)) {
@@ -999,6 +1080,17 @@ void ui_draw(void)
     case SCR_MODE: draw_mode_picker(); break;
     case SCR_EDIT: draw_edit(); break;
     case SCR_INFO: draw_info(); break;
+    case SCR_LOCK: {                            /* stock Power-on Password */
+        char t[16];
+        int n = stockfx_lock_len();
+        for(int i = 0; i < n; i++) { t[i] = '*'; }
+        t[n] = '_'; t[n + 1] = 0;
+        gfx_clear(C_BLACK);
+        ui_header("PASSWORD");
+        gfx_text_center(LCD_H / 2 - 18, "Power-on password", C_WHITE, C_BLACK, 1);
+        gfx_text_center(LCD_H / 2, t, C_YELLOW, C_BLACK, 2);
+        ui_softkeys("OK", "DEL");
+        break; }
     }
     if(s_screen != SCR_BOOT) { draw_popup(); }
     gfx_flush();

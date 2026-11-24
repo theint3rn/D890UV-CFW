@@ -41,7 +41,7 @@ def main():
     exe = os.path.join(tmp, "cfwcp_host_test")
     subprocess.check_call(["gcc", "-O1", "-Wall", "-Wno-int-to-pointer-cast", "-include", "tools/cfwcp_host.h",
                            "-Iapp", "-Ihal", "-Idrivers", "-Iinclude", "-Idsp", "-Ivoc",
-                           "tools/cfwcp_host_test.c", "app/cfwcp.c", "-o", exe], cwd=CFW)
+                           "tools/cfwcp_host_test.c", "app/cfwcp.c", "app/stockcp.c", "-o", exe], cwd=CFW)
     opt = ST.TABLES["OptionalSetting"]["columns"]
     edits = [(21, opt.index("TOT"), 0, "4"), (0xE0, 2, 0, "5"), (0xE0, 6, 0, "1"), (0xE2, 0, 3, "1"),
              (21, opt.index("TOT"), 0, "2")]          # a later entry wins

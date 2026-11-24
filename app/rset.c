@@ -3,6 +3,8 @@
 #include "rset.h"
 #include "hal.h"
 #include "gfx.h"
+#include "stockopt.h"
+#include "stockdlg.h"
 
 /* board key names for the six key slots (D168UV: PF1/PF2 post KEY_P1/KEY_P2, no PF3) */
 #ifndef CFW_KEY_SLOT_NAMES
@@ -38,7 +40,7 @@ static const uint32_t k_tot_s[] = { 0, 30, 60, 90, 120, 150, 180, 210, 240 };
 static const uint32_t k_apo_s[] = { 0, 600, 1800, 3600, 7200 };
 static const uint32_t k_bkt_s[] = { 0, 5, 10, 15, 20, 25, 30, 60, 120, 180, 240, 300, 900, 1800, 2700, 3600 };
 static const char *const k_kf[KF_COUNT] = { "None", "Next mode", "Mode list", "VFO/MEM", "Key lock", "Monitor", "Scan",
-                                            "Test tone", "Next zone", "Talkaround", "TX power", "Call log", "GPS info" };
+                                            "Test tone", "Next zone", "Talkaround", "TX power", "Call log", "GPS info", "Alarm" };
 static const char *const k_slot[RK_COUNT] = { CFW_KEY_SLOT_NAMES };
 static const uint8_t k_key_default[RK_COUNT] = { KF_MODE_NEXT, KF_VFO_MEM, KF_NONE, KF_NONE, KF_MODE_NEXT, KF_MODE_PICKER };
 
@@ -47,7 +49,7 @@ static uint8_t s_val[RS_COUNT];
 static uint8_t s_key[RK_COUNT];
 static cp_edit_t s_ed[MAX_EDITS];
 static int s_ned;
-static bool s_dirty, s_journal, s_rs_enc, s_rs_msms;
+static bool s_dirty, s_journal, s_rs_enc, s_rs_msms, s_rs_batt;
 
 static uint32_t dec(const char *t)
 {
@@ -82,6 +84,8 @@ static void apply_edits(void)
             s_rs_enc = v == 1;
         } else if(e->table == CP_JT_SETTINGS && e->col == CP_SET_SMS_FORMAT) {
             s_rs_msms = v == 1;
+        } else if(e->table == CP_JT_SETTINGS && e->col == CP_SET_BATT_PCT) {
+            s_rs_batt = v == 1;
         }
     }
 }
@@ -101,12 +105,15 @@ void rset_init(void)
     }
     s_rs_enc = st && (st->flags & 16u);
     s_rs_msms = st && (st->flags & 32u);
+    s_rs_batt = st && (st->flags & 64u);
     s_ned = 0;
     if(s_journal) {
         s_ned = cfwcp_journal_read(s_ed, MAX_EDITS);
         apply_edits();
     }
     s_dirty = false;
+    stockopt_init();                         /* stock common sections (app/stockopt.c) */
+    stockdlg_init();                         /* stock .rdt-only dialogs (app/stockdlg.c) */
 }
 
 /* settings blob edits (no journal): applied on top of the codeplug / defaults */
@@ -140,6 +147,17 @@ void rset_set(rs_id_t id, uint8_t v)
     if(id >= RS_COUNT || v >= k_defs[id].n || v == s_val[id]) { return; }
     s_val[id] = v;
     upsert(CP_JT_OPTIONAL, k_defs[id].col, 0, v);
+}
+
+/* any stock Optional Settings column edited in the radio (Menu > Radio extras > Options, app/ui_stock.c) */
+void rset_set_opt(uint8_t col, uint32_t v) { upsert(CP_JT_OPTIONAL, col, 0, v); }
+bool rset_opt_pending(uint8_t col, uint32_t *v)
+{
+    bool f = false;
+    for(int i = 0; i < s_ned; i++) {
+        if(s_ed[i].table == CP_JT_OPTIONAL && s_ed[i].col == col) { *v = dec(s_ed[i].text); f = true; }
+    }
+    return f;
 }
 
 const char *rset_key_name(uint8_t fn) { return fn < KF_COUNT ? k_kf[fn] : "?"; }
@@ -187,6 +205,15 @@ void rset_set_sms_mformat(bool on)
     if(on == s_rs_msms) { return; }
     s_rs_msms = on;
     upsert(CP_JT_SETTINGS, CP_SET_SMS_FORMAT, 0, on ? 1u : 0u);
+}
+
+/* battery in the status bar: icon (default) or percent (app/battdisp.c), flag b6, journal 0xE0 col 10 */
+bool rset_batt_percent(void) { return s_rs_batt; }
+void rset_set_batt_percent(bool on)
+{
+    if(on == s_rs_batt) { return; }
+    s_rs_batt = on;
+    upsert(CP_JT_SETTINGS, CP_SET_BATT_PCT, 0, on ? 1u : 0u);
 }
 
 /* Volume limit -> gain for the audio the MCU makes (decoded voice PCM, beeps), Q8: Indoor 1/16, level n = n/8 */

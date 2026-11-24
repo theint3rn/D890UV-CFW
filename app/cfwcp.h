@@ -54,7 +54,7 @@ typedef struct {
     char     callsign[8];
     uint32_t dmr_id, p25_unit_id;
     uint16_t nxdn_unit_id, flags;          /* flags: b0 rx_invert, b1 key beep, b2 auto key lock, b3 boot in VFO, b4 encryption on,
-                                            * b5 SMS format M-SMS (else cfw) */
+                                            * b5 SMS format M-SMS (else cfw), b6 battery shown as percent (else icon) */
     uint32_t step_hz;
     uint16_t deemph_us, test_tone_hz;
     uint8_t  backlight_level, backlight_timeout_s, vfo_mode, keylock_timeout_s;
@@ -139,8 +139,14 @@ uint32_t cfwcp_crc(void);
 uint32_t cfwcp_generation(void);
 void     cfwcp_apply_radio(void);        /* codeplug radio settings -> g_radio (defaults; persisted edits win) */
 const cp_chext_t *cfwcp_chext(int channel);                 /* NULL = all defaults */
-int      cfwcp_key_count(void);
-const cp_key_t *cfwcp_key(int i);                           /* user-entered keys (P25 / DMR / NXDN) */
+int      cfwcp_key_count(void);                             /* section 12 keys + the stock key tables (stockcp.h) */
+const cp_key_t *cfwcp_key(int i);                           /* user-entered keys (P25 / DMR / NXDN), then stock ones */
+int      cfwcp_own_key_count(void);                         /* section 12 only */
+/* any section by id (NULL if absent or the record size differs) */
+const void *cfwcp_section(uint16_t id, uint16_t rec_size, uint32_t *count);
+/* walk the stock section 10 entries (u8 table, u8 col, u16 row, u16 len, text), journal included; fn false = stop */
+typedef bool (*cfwcp_walk_fn)(const uint8_t *e, uint32_t pos, void *u);
+void     cfwcp_stock_walk(cfwcp_walk_fn fn, void *u);
 int      cfwcp_bandplans(int trunksys, const cp_bandplan_t **first, int max);   /* copies pointers, returns count */
 /* stock CPS setting stored by the CPS (section 10, CSV text): table = index in the stock .LST order (21 = OptionalSetting,
  * 34 = NXSetting, 19 = APRS, 22 = AlertTone), col = CSV column (cfw_cps/schema/stock_d890uv.json). Record tables only hold
@@ -170,7 +176,7 @@ uint16_t cfwcp_member(uint32_t first, int k);                 /* pool16[first + 
 #define CP_JT_MARK      0xEEu
 #define CP_JT_CRCFIX    0xEFu
 enum { CP_SET_KEY_P1 = 0, CP_SET_KEY_P2, CP_SET_KEY_PF1, CP_SET_KEY_PF2, CP_SET_KEY_PF3, CP_SET_KEY_PF3L,
-       CP_SET_ENCRYPTION = 6, CP_SET_SMS_FORMAT = 7, CP_SET_START_ZONE = 8, CP_SET_START_CH = 9 };
+       CP_SET_ENCRYPTION = 6, CP_SET_SMS_FORMAT = 7, CP_SET_START_ZONE = 8, CP_SET_START_CH = 9, CP_SET_BATT_PCT = 10 };
 enum { CP_CH_POWER = 0 };
 typedef struct { uint8_t table, col; uint16_t row; char text[8]; } cp_edit_t;
 int      cfwcp_journal_spare(void);       /* bytes the journal may use (0 = no room / no codeplug) */

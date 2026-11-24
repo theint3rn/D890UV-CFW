@@ -30,6 +30,10 @@ RADIOS = {
                  model="D168UV", side={"pf1": "A13", "pf2": "A14", "ptt": "D0"}, args=["--cfw"]),
 }
 
+if os.environ.get("CFW_SNAP"):                 # snapshot of builds: <dir>/build/cfw.elf, build_emu/..., cfw168.elf (tests on a busy tree)
+    for _k, _f in (("d890", "cfw.elf"), ("d168", "cfw168.elf")):
+        RADIOS[_k]["elf"] = os.path.join(os.environ["CFW_SNAP"], "build", _f)
+
 
 def codeplug_bin(path, model, out):
     sys.path.insert(0, CPS)

@@ -37,12 +37,28 @@
 #define DMR_PRIV_LC_FID  0x00u
 #endif
 
-enum { DMR_PRIV_NONE = 0, DMR_PRIV_CFW_AES256 = 1 };
+/* cfw privacy algorithms (alg field of the PI header / privacy LC). All use the same signalling and the same
+ * keystream addressing (IV, superframe, byte offset, 'V'/'D', key id); they differ in the key size and the generator:
+ *   CFW_AES256  AES-256-CTR, 32-byte key (cfw_cps key kind 3)
+ *   CFW_AES128  AES-128-CTR, 16-byte key (kind 2; the stock CPS "AES Encryption Code" with a 32-hex-digit key)
+ *   CFW_RC4     RC4-drop256 per superframe, key = K || IV || sf || kind || key id, K 5 bytes (40 bit, kind 1;
+ *               the stock CPS "ARC4 Encryption Code"); max 16 key bytes
+ *   CFW_BP      16-bit key (kind 0; the stock CPS "Encryption Code" / basic privacy), AES-128-CTR with the key
+ *               16 | 'cfw-basic-priv' padding: as weak as any 16-bit scheme (65536 keys), only privacy against
+ *               casual listeners.
+ * None of these is the stock radio's (or the DMRA's / Motorola's / Hytera's) algorithm: the stock D890UV / D168UV
+ * do their encryption inside the SCT3288 baseband (encrypted firmware image), so the stock schemes are not known
+ * here and cfw only interoperates with cfw radios. */
+enum { DMR_PRIV_NONE = 0, DMR_PRIV_CFW_AES256 = 1, DMR_PRIV_CFW_AES128 = 2, DMR_PRIV_CFW_RC4 = 3, DMR_PRIV_CFW_BP = 4 };
 
-typedef struct { uint8_t alg, key_id; uint8_t key[32]; } dmr_key_t;
+/* len: key bytes used (0 = the algorithm's default: 32 / 16 / 5 / 2) */
+typedef struct { uint8_t alg, key_id; uint8_t key[32]; uint8_t len; } dmr_key_t;
 #define DMR_MAX_KEYS 8
 typedef struct { dmr_key_t k[DMR_MAX_KEYS]; uint8_t n; } dmr_keyring_t;
 const dmr_key_t *dmr_keyring_find(const dmr_keyring_t *kr, uint8_t alg, uint8_t key_id);
+/* late entry: the privacy LC carries only the low 4 bits of the key id */
+const dmr_key_t *dmr_keyring_find_lc(const dmr_keyring_t *kr, uint8_t alg, uint8_t key_id4);
+int dmr_priv_key_len(uint8_t alg);            /* default key length of an algorithm, -1 unknown */
 
 typedef struct dmr_priv dmr_priv_t;
 /* keystream provider: fill n bytes of keystream starting at byte offset `off` of superframe `sf` */
@@ -55,13 +71,14 @@ struct dmr_priv {
     uint32_t iv;
     uint16_t sf;                  /* current voice superframe number */
     aes_ctx_t aes;
-    dmr_priv_ks_fn ks;            /* default: cfw AES-256-CTR */
+    uint8_t  rk[16], rklen;       /* RC4 key bytes */
+    dmr_priv_ks_fn ks;            /* by alg (see above) */
 };
 
 /* information carried by the PI header / privacy LC */
 typedef struct { uint8_t alg, key_id; uint32_t iv; uint16_t sf; } dmr_priv_info_t;
 
-int  dmr_priv_setup(dmr_priv_t *p, const dmr_key_t *key);       /* -1: unknown alg / no key */
+int  dmr_priv_setup(dmr_priv_t *p, const dmr_key_t *key);       /* -1: unknown alg / bad length / no key */
 void dmr_priv_wipe(dmr_priv_t *p);
 void dmr_priv_sync(dmr_priv_t *p, uint32_t iv, uint16_t sf);
 /* xor one 72-bit vocoder frame: burst 0..5 (A..F) and frame 0..2 inside the burst, superframe p->sf */

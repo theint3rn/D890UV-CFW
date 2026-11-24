@@ -8,13 +8,15 @@
  *   "Alarming" popup; Alarm Setting type 1..3 would also transmit, see D168UV/emu/README "Man down").
  *   cfw: same detection (50 ms polls, 30 in a row = 1.5 s), countdown ManDownWait s, then a local alarm: red
  *   "Alarming / MAN DOWN" popup + alarm tone (spk beeps 1750 Hz) until the radio stands up again or a key cancels it.
- *   The stock TX alarm (emergency call on the alarm channel) is not done: the cfw never keys the transmitter by itself.
+ *   The stock TX alarm (emergency call on the alarm channel) is not done: the cfw never keys the transmitter by itself
+ *   (app/emerg.c: the Alarm Setting types with transmit run in the emulator builds only).
  * Emulator: `i2c Fall` / `i2c Upright` (D168UV emu/models/I2cBus168.cs, D890UV emu/models/I2cBus.cs). */
 #include "mandown.h"
 #include "hal.h"
 #include "gfx.h"
 #include "rset.h"
 #include "spk.h"
+#include "emerg.h"
 #include "ui_int.h"
 
 volatile uint32_t g_mandown_dbg[4];
@@ -31,6 +33,7 @@ void mandown_cancel(void)
     if(s_state != MD_ALARM) { return; }
     s_cancelled = true;
     s_state = MD_FALLEN;
+    emerg_cancel();
 }
 
 static void alarm_tick(uint32_t now)
@@ -56,7 +59,7 @@ void mandown_tick(uint32_t now)
     if(up < 0) { return; }                                        /* no new sample */
     if(up) {
         s_low = 0; s_cancelled = false;
-        if(s_state == MD_ALARM) { spk_stop(); ui_popup("MAN DOWN", "cancelled", C_GREEN); }
+        if(s_state == MD_ALARM) { emerg_cancel(); spk_stop(); ui_popup("MAN DOWN", "cancelled", C_GREEN); }
         s_state = MD_UP;
     } else if(s_state == MD_UP && ++s_low >= 30) {
         s_state = MD_COUNT;
@@ -66,6 +69,7 @@ void mandown_tick(uint32_t now)
     if(s_state == MD_COUNT && (int32_t)(now - s_deadline) >= 0 && !s_cancelled) {
         s_state = MD_ALARM;
         g_mandown_dbg[1]++;
+        emerg_start("MAN DOWN", false);      /* transmit part of the Alarm Setting (not in HW builds) */
         s_beep_t = now - 600u; s_pop_t = now - 1200u;
         alarm_tick(now);
         g_mandown_dbg[0] = s_state;

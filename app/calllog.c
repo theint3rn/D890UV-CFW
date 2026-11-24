@@ -1,5 +1,6 @@
 #include <string.h>
 #include "calllog.h"
+#include "stockopt.h"
 #include "hal.h"
 #include "modem_core.h"
 #include "radio.h"
@@ -31,6 +32,7 @@ void calllog_poll(void)
         return;
     }
     if(!ci->src_id && !ci->src_call[0] && !ci->dst_id) { return; }     /* nothing to log yet */
+    if(ci->src_id && ci->src_id == g_radio.my_id && stockopt_opt(53, 0)) { return; }   /* stock Filter Own ID In MissCall */
     s_last = *ci;
     s_in_call = true;
     call_rec_t r;

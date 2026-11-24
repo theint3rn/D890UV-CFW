@@ -105,6 +105,7 @@ void     audio_tone(bool on);              /* speaker on the MCU tone output (be
 bool     audio_tone_muted(void);           /* D890UV: volume knob at 0 (stock plays no tone then); D168UV: false */
 void     audio_volume_limit(uint8_t maxvol); /* stock Vol Level 0 = Indoor, 1..8 (D168UV: baseband attenuation,
                                               * D890UV: I2C volume pot table[maxvol][knob]) - see docs/AUDIO_PATHS.md */
+uint8_t  audio_codec_att(void);            /* SCT3288 codec speaker attenuation 0..0x1F (D168UV: from the volume limit) */
 void     audio_poll(void);                 /* D890UV: follows the volume knob (pot); D168UV: no-op */
 
 /* ---- VOX detector (stock: the hardware decides, the MCU only polls) ----
@@ -172,8 +173,9 @@ typedef void (*bb_msg_cb)(uint8_t b0, uint8_t id, const uint8_t *data, uint16_t 
 void     bb_init(void);                   /* SPI2 + state machine */
 void     bb_poll(void);                   /* call every 5-10 ms: drains frames, advances init */
 bool     bb_ready(void);
-const char *bb_status(void);              /* short text for the UI */
-bool     bb_send(uint8_t b0, uint8_t id, const uint8_t *data, uint16_t len);
+const char *bb_status(void);              /* short text for the UI (ready: what the vocoder probe found) */
+bool     bb_send(uint8_t b0, uint8_t id, const uint8_t *data, uint16_t len);   /* allow-list: hal/bb_allow.h */
+uint16_t bb_refused(uint8_t *b0, uint8_t *id);   /* commands refused so far + the last one */
 void     bb_set_listener(bb_msg_cb cb);   /* all frames after init go here */
 const uint8_t *bb_version(void);          /* 9 bytes from cmd 0x33, valid once ready */
 

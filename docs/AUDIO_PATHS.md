@@ -104,13 +104,21 @@ computes APC = 0xFF (DAC 0x0FF0, the level the cfw-emu trace saw) and tune 0xFFF
 0x0814A90A (2550 / 2750 / 2850 / 2950 / 4095) and 0 = off (`FUN_08114730`).
 
 ## Audio routing (speaker)
-`FUN_080c32e8(source, chip)` -> `FUN_08118df8(mask, chip)`: bit0 = RF reg 0x52 switch 1 (`FUN_080e3c00` ->
-`FUN_08019ab4(1, v, chip)`: reg 0x52 = idx << 12 | 0x40 | v, written on change), bit2 = switch 2 (`FUN_080e3580`),
-bit3 = PC7. Baseband codec audio: codec register 0x0F via `FUN_0811687c` (1 = off, 0 = on). PC12 = speaker amplifier
-(`FUN_08118dbc` on, `FUN_08118d9c` off).
-* source 0 (MCU tone, idle): codec off, mask 2 (switches 1 + 2 off, PC7 low), amplifier on.
-* source 1 (analog receive, main chip): mask 4 (switch 2 on) - or 1 / 0 depending on channel state; codec off.
-* digital receive: mask 0x10 (RF switches off), codec on.
+Corrected 2026-11-24 (decompile + register trace of the stock V1.05 in the emulator, `tools/rf_compare.py`):
+`FUN_080c32e8(source, locked, flag)` -> `FUN_08118df8(mask, locked)`: bit0 = switch 1 (`FUN_080e3c00`), bit2 = switch 2
+(`FUN_080e3580`), bit3 = PC7. The second argument is not the chip (it selects the bus-locked write). Both switches are reg
+0x52 outputs of **RF chip 1** (CS PD3): `FUN_08019ab4(idx, v)` -> `FUN_080e2f64('R', idx << 12 | 0x40 | v, 1)`, and
+`FUN_080e2f64` drives CS PB5 for chip argument 0 and CS PD3 for 1. Trace: an FM signal opens the squelch -> `1 52 2041`.
+Chip 0 has its own function (`FUN_08010b2c`): antenna / band switches, see `rf_chip.md`.
+PC12 = speaker amplifier (`FUN_08118dbc` on, `FUN_08118d9c` off).
+* source 0 (MCU tone, idle): mask 2 (switches 1 + 2 off, PC7 low), amplifier on.
+* analog receive of chip 0: mask 4 (switch 2 on). Analog receive of chip 1 (stock dual watch): mask 8 (PC7 high).
+* digital receive (baseband audio): mask 1 (switch 1 on), chosen by `FUN_080d1170()` (channel type).
+* broadcast receiver, FM (source 4) and AM (`FUN_080c6dc0() != 0`): mask 0x10 (all off), the receiver IC feeds the amplifier.
+* `FUN_0811687c` (1 = off, 0 = on) is the mute of the broadcast receiver IC (I2C 0x35 register 0x0F, written by
+  `FUN_08139728`), not a register of the baseband codec as written here before.
+* Modulation source switch `FUN_081140ec(n)` = PA1, PE0, PD2, PD1, PD0: receive and MCU tone (5): 0 1 1 0 0; transmit 0 / 1
+  microphone, 2 PTT ID, 3 / 4 digital. The cfw sets the receive position only; which transmit position carries what is open.
 * volume knob at step 0 (`DAT_2001d774 == 0`): `FUN_080252e0` = amplifier off + codec off, nothing is heard - the stock
   tone player `FUN_0801a6d0(id)` -> `FUN_080c32e8(0)` plays no tone then.
 * Key/alert tones: `FUN_0801a6d0` -> `FUN_08025320` (stop the previous one: TIM5 off, CCR4 0, PB9 analog, TIM4 off),

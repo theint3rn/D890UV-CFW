@@ -107,7 +107,7 @@ signalling decoder (4800 Hz), not APRS. The original (wrong) analysis follows:
 SPI2, CS# PB12, data-ready PD11, frame-pending PD7. Frame `84 A9 61 LenH LenL B0 ID data… [pad]`.
 MCU queue `FUN_080122ec(id, ptr)` → sender `FUN_0802dff8` (length per ID from table `0x0815699D`, stride 2;
 B0 in `DAT_20004620`, set by `FUN_080c43d4`). RX parser `FUN_0813af78`, wait `FUN_080dee40`. Boot
-handshake as in `CLAUDE.md` (raw `74 A9 01 00 01 00`, `FUN_08100664`).
+handshake as in the project notes (raw `74 A9 01 00 01 00`, `FUN_08100664`).
 
 `B0` byte = message group. From the MCU code and the SCT tool XMLs:
 

@@ -15,8 +15,9 @@
  *              0x88 |= 0x80 (the IC at the 2.925 MHz IF)
  *   power down FUN_080e4698: 0x10 |= 0x40, 5 ms, 0x76 &= ~2, 1 ms, 0x0E |= 0x20
  * AM path on RF chip 1 (stock FUN_08010c1c AM branch): reg 0x56 = 0, 0x16 = 0, 0x2F = 0x0A0F, GPIO pins of reg 0x52
- * (FUN_08019ab4: (pin << 12) | 0x40 | value) 5, 7, 4 = 1, IC set-up + AM band + IF, frequency = air band + 2.925 MHz
- * (AM Offset positive; negative: - 2.925 MHz, FUN_0810df0c), reg 0x5C = 2, reg 0x56 = 6. Off: pins 7, 4, 5 = 0. */
+ * (FUN_08019ab4: chip 1, (pin << 12) | 0x40 | value) 5, 7, 4 = 1, IC set-up + AM band + IF, frequency = air band + 2.925 MHz
+ * (AM Offset positive; negative: - 2.925 MHz, FUN_0810df0c), reg 0x5C = 2, reg 0x56 = 6. Off: pins 7, 4, 5 = 0. FM: pin 5 = 1, pin 4 = 0 (FUN_08111a58).
+ * Speaker: both audio switches off (stock source 4 / AM: mask 0x10), the IC feeds the amplifier itself. */
 #include "stm32u5.h"
 #include "board.h"
 #include "hal.h"
@@ -72,8 +73,12 @@ static void am_path(bool on)
         rf_write(1, 0x30, 0x5F6B);                      /* chip 1 receiving (its stock power-on state) */
         rf_write(1, 0x56, 0); rf_write(1, 0x16, 0); rf_write(1, 0x2F, 0x0A0F);
         gpio1(5, 1); gpio1(7, 1); gpio1(4, 1);
+        gpio_clr(MCU_AUD_PORT, MCU_AUD);                 /* PC13 low with AM on, as stock */
+        rf_am_path(true);                               /* chip 0 antenna switches */
     } else {
         gpio1(7, 0); gpio1(4, 0); gpio1(5, 0);
+        gpio_set(MCU_AUD_PORT, MCU_AUD);
+        rf_am_path(false);
         rf_idle(1);
     }
 }
@@ -92,6 +97,7 @@ bool bcast_on(int band, uint32_t hz)
     if(s_band == BC_AM && band != BC_AM) { am_path(false); }
     ic_up();
     if(band == BC_FM) {
+        gpio1(5, 1); gpio1(4, 0);                        /* FUN_08111a58 */
         rmw(0x88, (uint8_t)~0x40, 0);
         ic_volume();
         uint32_t ch = hz / 50000u;                       /* FUN_081169c0: (f / 10 kHz) / 5 */
@@ -117,17 +123,18 @@ bool bcast_on(int band, uint32_t hz)
         rf_set_freq(1, neg ? hz - AM_IF : hz + AM_IF);
         rf_write(1, 0x5C, 2);
         rf_write(1, 0x56, 6);
+        rf_write(1, 0x5C, 0x1002);                       /* trace: ends at 0x1002 */
     }
     s_band = band;
     s_hz = hz;
-    audio_route(AUDIO_RF);
+    audio_route(AUDIO_DIRECT);                           /* stock mask 0x10: RF / baseband switches off */
     return s_ack;
 }
 
 void bcast_off(void)
 {
     if(s_band == BC_OFF) { return; }
-    if(s_band == BC_AM) { am_path(false); }
+    if(s_band == BC_AM) { am_path(false); } else { gpio1(5, 0); }
     ic_down();
     s_band = BC_OFF;
     s_hz = 0;

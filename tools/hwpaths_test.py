@@ -8,7 +8,8 @@ VOX 1, Vol Level 2, key beep on):
   voxcfg  VOX 1 configured: D890UV UART4 frame cmd 0x12 byte 12 = 1; D168UV RF reg 0x12 = 0x2020, reg 0x13 = 0x0031
   vox     detector on (D890UV: module status cmd 3 byte 3 = 1; D168UV: PD3 low) -> TX keyed; off -> released
   mandown `i2c Fall` -> after 1.5 s + 2 s "Alarming / MAN DOWN" popup + alarm; `i2c Upright` -> cancelled
-  route   D890UV: FM receive = amplifier PC12 on, PC7 low, RF reg 0x52 switch 2 on; knob at 0 -> amplifier off and a
+  route   D890UV: FM receive = amplifier PC12 on, PC7 low, RF chip 1 reg 0x52 = 0x2041 (switch 2 on,
+          1 off: stock trace `1 52 2041`, FUN_08019ab4; docs/RF_COMPARE.md); knob at 0 -> amplifier off and a
           key press plays no beep (stock FUN_080c32e8 / FUN_080252e0). D168UV: skipped (analog knob).
 
   python3 cfw/tools/hwpaths_test.py [--radio d890|d168]"""
@@ -63,7 +64,7 @@ def main():
     steps += ["0|i2c Fall", "4.5|shot", "0|sysbus ReadDoubleWord 0x%08X" % (md + 4), "0|i2c Upright", "0.6|shot",
               "0|sysbus ReadDoubleWord 0x%08X" % md]
     if d890:
-        steps += ["0|sysbus ReadDoubleWord 0x42020814", "0|rf0 Peek 0x52",               # GPIOC ODR, reg 0x52
+        steps += ["0|sysbus ReadDoubleWord 0x42020814", "0|rf1 Peek 0x52",               # GPIOC ODR, reg 0x52
                   "0|analog Set 2 0", "0.3|sysbus ReadDoubleWord 0x42020814",
                   "0|sysbus ReadDoubleWord 0x%08X" % spk, "0|lcd Press 13 150", "0.4|version", "0|lcd Press 14 150",
                   "0.4|sysbus ReadDoubleWord 0x%08X" % spk]
@@ -129,12 +130,12 @@ def main():
     print("mandown: alarms %d, popup %s, cancelled %s, state after upright %d" %
           (alarms, "Alarming" in txt, "cancelled" in txt, state))
     if d890:
-        odr, r52 = num("0x42020814"), num("rf0 Peek 0x52")
+        odr, r52 = num("0x42020814"), num("rf1 Peek 0x52")
         odr0 = num("0x42020814")
         b0, b1 = num("0x%08X" % spk), num("0x%08X" % spk)
-        res["route"] = (odr >> 12) & 1 == 1 and (odr >> 7) & 1 == 0 and (r52 & 0xF001) == 0x2001 and \
+        res["route"] = (odr >> 12) & 1 == 1 and (odr >> 7) & 1 == 0 and r52 == 0x2041 and \
             (odr0 >> 12) & 1 == 0 and b1 == b0
-        print("route: FM RX PC12 %d PC7 %d reg52 0x%04X; knob 0 -> PC12 %d, beeps %d" %
+        print("route: FM RX PC12 %d PC7 %d chip 1 reg52 0x%04X; knob 0 -> PC12 %d, beeps %d" %
               ((odr >> 12) & 1, (odr >> 7) & 1, r52, (odr0 >> 12) & 1, b1 - b0))
     print("montage:", os.path.join(out, "montage.png"))
     for kk, vv in res.items():

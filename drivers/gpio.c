@@ -81,11 +81,15 @@ void gpio_init_board(void)
     gpio_clr(TX_EN1_PORT, TX_EN1);
     gpio_mode(TX_EN1_PORT, TX_EN1, GPIO_OUT, PULL_NONE);
 
-    /* baseband: CS high, reset released (high), ready lines in */
+    /* baseband: CS high, off / in reset until bb_init (stock FUN_080d6f5c), ready lines in */
     gpio_set(BB_CS_PORT, BB_CS);
     gpio_mode(BB_CS_PORT, BB_CS, GPIO_OUT, PULL_NONE);
-    gpio_set(BB_RDY_PORT, BB_RST);
+    gpio_clr(BB_RDY_PORT, BB_RST);
     gpio_mode(BB_RDY_PORT, BB_RST, GPIO_OUT, PULL_NONE);
+    gpio_clr(BB_RDY_PORT, BB_NRST);
+    gpio_mode(BB_RDY_PORT, BB_NRST, GPIO_OUT, PULL_NONE);
+    gpio_clr(BB_RDY_PORT, BB_PD10);
+    gpio_mode(BB_RDY_PORT, BB_PD10, GPIO_OUT, PULL_NONE);
     gpio_mode(BB_RDY_PORT, BB_RDY, GPIO_IN, PULL_DOWN);
     gpio_mode(BB_RDY_PORT, BB_PEND, GPIO_IN, PULL_DOWN);
 }

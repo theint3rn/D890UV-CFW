@@ -14,6 +14,7 @@
 #include "spk.h"
 #include "cfwcp.h"
 #include "hal.h"
+#include "dbg.h"
 #include "gfx.h"
 #include "modem_core.h"
 #include "dsp_backend.h"
@@ -190,21 +191,42 @@ uint16_t stockfx_color(uint8_t which)
 }
 
 /* ------------------------------------------------------------------ power-on password */
-static char s_pw[12], s_in[12];
+/* Nobody may be locked out: only Password = On (1) with 1..8 digits locks (the stock length; anything else could not be
+ * typed, or is not a stock value). HW builds ignore the password (and say so once): a forgotten or damaged one could only
+ * be cleared with SWD or a reflash. make HW=1 HW_SAVE=1 HW_PASSWORD=1 enforces it: that build has the CPS link, which
+ * answers on the password screen too, and a codeplug without the password opens the radio at once (stockfx_lock_recheck). */
+#if defined(CFW_HW_BUILD) && !defined(CFW_HW_PASSWORD)
+#define LOCK_OFF 1
+#else
+#define LOCK_OFF 0
+#endif
+#define PW_MAX 8
+static char s_pw[PW_MAX + 2], s_in[PW_MAX + 2];
 static uint8_t s_lock;                         /* 0 not looked yet, 1 locked, 2 open */
 bool stockfx_locked(void)
 {
     if(!s_lock) {
         s_lock = 2;
-        if(stockopt_opt(OC_PASSWORD, 0) && stockopt_opt_text(OC_PWCHAR, s_pw, sizeof s_pw)) {
-            int n = (int)strlen(s_pw);
-            while(n && s_pw[n - 1] == ' ') { s_pw[--n] = 0; }
-            for(int i = 0; i < n; i++) { if(s_pw[i] < '0' || s_pw[i] > '9') { n = 0; } }
-            if(n) { s_lock = 1; }                /* digits only: anything else could not be typed */
+        s_in[0] = 0;
+        char t[16];
+        if(stockopt_opt(OC_PASSWORD, 0) == 1u && stockopt_opt_text(OC_PWCHAR, t, sizeof t)) {
+            int n = (int)strlen(t);
+            while(n && t[n - 1] == ' ') { t[--n] = 0; }
+            bool ok = n >= 1 && n <= PW_MAX;
+            for(int i = 0; i < n; i++) { if(t[i] < '0' || t[i] > '9') { ok = false; } }
+            if(ok && LOCK_OFF) {
+                g_radio.tx_note[0] = "PASSWORD OFF"; g_radio.tx_note[1] = "HW build"; g_radio.tx_note_seq++;
+                dbg_puts("power-on password ignored (HW build)\n");
+            } else if(ok) {
+                memcpy(s_pw, t, (size_t)n + 1u);
+                s_lock = 1;
+            }
         }
     }
     return s_lock == 1;
 }
+/* codeplug changed (boot, CPS write): a locked radio looks again, an open one stays open until the next power on */
+void stockfx_lock_recheck(void) { if(s_lock == 1) { s_lock = 0; } }
 int stockfx_lock_len(void) { return (int)strlen(s_in); }
 void stockfx_lock_key(int digit, bool enter, bool clear)
 {

@@ -4,7 +4,7 @@
  * (stock parser FUN_0813af78, message entry = frame + 5; MCU writer FUN_0810a674, reader FUN_0810a6dc).
  * Reading = clocking a dummy byte equal to the last byte sent (stock FUN_08103838 resends DAT_2001deee).
  *
- * Init (stock FUN_080fa16c -> FUN_080e70ec -> FUN_080e6c64, see CLAUDE.md "Baseband"):
+ * Init (stock FUN_080fa16c -> FUN_080e70ec -> FUN_080e6c64, see project notes "Baseband"):
  *   1. wait ID 0x17 status 0x0E (FUN_0810061c)
  *   2. send the raw 6-byte config 74 A9 01 00 01 00 (FUN_08100664, not a framed message)
  *   3. wait ID 0x17 status 00/01 (FUN_081005cc)
@@ -155,6 +155,15 @@ void bb_init(void)
     SPI2_CR2 = 0;                                      /* TSIZE 0 = endless */
     SPI2_CR1 |= 1u;                                    /* SPE */
     SPI2_CR1 |= 1u << 9;                               /* CSTART */
+
+    /* power / reset pins as stock FUN_080d6f5c (register traces: PC6 1, PD8 1, PD9 0, PD10 0 in every running state; until
+     * 2026-11-24 the cfw held PD9 high and PD8 low) */
+    gpio_set(BB_PWR_PORT, BB_PWR);
+    gpio_mode(BB_PWR_PORT, BB_PWR, GPIO_OUT, PULL_NONE);
+    for(int k = 0; k < 4; k++) {                       /* PD8 low 100 ms, high 100 ms, low 100 ms, high */
+        if(k & 1) { gpio_set(BB_RDY_PORT, BB_NRST); } else { gpio_clr(BB_RDY_PORT, BB_NRST); }
+        if(k < 3) { delay_us(100000u); }
+    }
 
     s_rx_n = 0;
     s_state = ST_WAIT_BOOT;

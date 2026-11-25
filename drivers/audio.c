@@ -1,11 +1,13 @@
 /* D890UV speaker path, as the stock V1.05 firmware drives it (docs/AUDIO_PATHS.md "Audio routing").
  *
- * Source select FUN_080c32e8(source) -> FUN_08118df8(mask, chip):
- *   mask bit0 = RF reg 0x52 switch 1 (FUN_080e3c00 -> FUN_08019ab4(1, v, chip)), bit2 = switch 2 (FUN_080e3580),
- *   bit3 = PC7; the baseband codec's audio is switched by codec reg 0x0F (FUN_0811687c: 1 = off, 0 = on).
- *   source 0 (MCU tone / nothing): codec off, mask 2 = switches 1 + 2 off, PC7 low
- *   source 1 (analog receive on the main chip): mask 4 = switch 2 on (or 1 / 0 by channel state)
- *   digital receive: mask 0x10 = RF switches off, codec on
+ * Source select FUN_080c32e8(source) -> FUN_08118df8(mask): bit0 = switch 1 (FUN_080e3c00), bit2 = switch 2
+ *   (FUN_080e3580), bit3 = PC7. Both switches are GPIO outputs of RF CHIP 1 (CS PD3): FUN_08019ab4 writes reg 0x52 =
+ *   idx << 12 | 0x40 | v with chip argument 1 (chip 0 has its own function, FUN_08010b2c, and other uses of 0x52: rf.c).
+ *   mask 4    = switch 2: analog receive of RF chip 0
+ *   mask 1    = switch 1: baseband (digital voice): FUN_080d1170() != 0 = digital channel
+ *   mask 8    = PC7: analog receive of RF chip 1 (stock dual watch; not used by the cfw)
+ *   mask 2    = all off: MCU tone (PB9, source 0); mask 0x10 = all off: broadcast receiver, FM (source 4) and AM
+ *   FUN_0811687c is the mute of the broadcast receiver (I2C 0x35 reg 0x0F), not a baseband codec register.
  *   amplifier PC12 on (FUN_08118dbc; off FUN_08118d9c) - and everything off (FUN_080252e0) while the volume knob is at
  *   its 0 step: the stock radio plays no tone and no audio then.
  * Volume: the knob is a plain potentiometer read by ADC1 ch3 (stock buffer 0x20001D38 = cfw ADC frame slot 2) and
@@ -14,7 +16,7 @@
  *   value = table 0x0815153E [Vol Level 0..8 (settings +0x3B; 0 = Indoor)][step] (FUN_081137c0, 9 x 16 bytes,
  *   0x00..0x7F = 7-bit pot), resent when it changes (FUN_0801ff48). So the volume limit caps all speaker audio,
  *   FM receive included.
- * Not done: codec reg 0x0F (baseband side), the BT-headset case (FUN_08118d9c with DAT_2001af0e).
+ * Not done: broadcast receiver muted during a beep, the BT-headset case (FUN_08118d9c with DAT_2001af0e).
  * Unverified on hardware. */
 #include "stm32u5.h"
 #include "board.h"
@@ -37,17 +39,33 @@ static const uint8_t k_vol[9][16] = {                                   /* stock
 static bool s_init, s_tone;
 static int s_mode = AUDIO_MUTE;
 static uint8_t s_maxvol = 8, s_step = 0xFF, s_pot = 0xFF;
-static uint8_t s_sw;                                                    /* reg 0x52 switches 1 / 2 as written */
+static uint8_t s_sw;                                                    /* chip 1 reg 0x52 switches 1 / 2 as written */
 
 static void sw(int idx, bool on)                                        /* stock FUN_08019ab4: write on change */
 {
     uint8_t m = (uint8_t)(1u << idx);
     if(on == ((s_sw & m) != 0) && s_init) { return; }
     s_sw = on ? (uint8_t)(s_sw | m) : (uint8_t)(s_sw & ~m);
-    rf_write(0, 0x52, (uint16_t)((idx << 12) | 0x40 | (on ? 1 : 0)));
+    rf_write(1, 0x52, (uint16_t)((idx << 12) | 0x40 | (on ? 1 : 0)));
 }
 
 static void pin(int p, bool v) { GPIO_BSRR(AMP_PORT) = v ? (1u << p) : (1u << (p + 16)); }
+
+/* Modulation source switch FUN_081140ec(n): PA1, PE0, PD2, PD1, PD0. Receive (and the MCU tone, n = 5): PE0 and PD2 high,
+ * the others low. The stock transmit positions (0 / 1 microphone, 2 PTT ID, 3 / 4 digital) are not used by the cfw: which
+ * one carries what is not measured. */
+static void mod_source_rx(void)
+{
+    RCC_AHB2ENR1 |= (1u << 0) | (1u << 3) | (1u << 4);                  /* GPIOA, D, E */
+    GPIO_BSRR(GPIOA) = 1u << (1 + 16);
+    GPIO_BSRR(GPIOE) = 1u << 0;
+    GPIO_BSRR(GPIOD) = (1u << 2) | (1u << (1 + 16)) | (1u << (0 + 16));
+    gpio_set(MCU_AUD_PORT, MCU_AUD);
+    gpio_mode(MCU_AUD_PORT, MCU_AUD, GPIO_OUT, PULL_NONE);
+    gpio_mode(GPIOA, 1, GPIO_OUT, PULL_NONE);
+    gpio_mode(GPIOE, 0, GPIO_OUT, PULL_NONE);
+    for(int k = 0; k < 3; k++) { gpio_mode(GPIOD, k, GPIO_OUT, PULL_NONE); }
+}
 
 static uint8_t knob_step(void)                                          /* stock FUN_0804bc50 */
 {
@@ -64,10 +82,11 @@ static void apply(int mode)
         pin(AMP_PIN, false); pin(AUD_PC7_PIN, false);
         gpio_mode(AMP_PORT, AMP_PIN, GPIO_OUT, PULL_NONE);
         gpio_mode(AMP_PORT, AUD_PC7_PIN, GPIO_OUT, PULL_NONE);
+        mod_source_rx();
     }
     bool on = mode != AUDIO_MUTE && knob_step() != 0;
     pin(AUD_PC7_PIN, false);
-    sw(1, false);
+    sw(1, on && mode == AUDIO_BB);
     sw(2, on && mode == AUDIO_RF);
     s_init = true;
     pin(AMP_PIN, on);
@@ -84,7 +103,7 @@ void audio_route(int mode)
 void audio_tone(bool on)
 {
     if(on == s_tone) { return; }
-    if(on) { apply(AUDIO_BB); s_tone = true; }
+    if(on) { apply(AUDIO_DIRECT); s_tone = true; }
     else { s_tone = false; apply(s_mode); }
 }
 
@@ -112,7 +131,7 @@ void audio_poll(void)
     if(st != s_step) {
         bool was0 = s_step == 0, is0 = st == 0;
         s_step = st;
-        if(was0 != is0 && s_init) { apply(s_tone ? AUDIO_BB : s_mode); }   /* amplifier follows the 0 step */
+        if(was0 != is0 && s_init) { apply(s_tone ? AUDIO_DIRECT : s_mode); }   /* amplifier follows the 0 step */
     }
     pot_update();
 }

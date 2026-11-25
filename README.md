@@ -19,6 +19,7 @@ make HW=1                 # build meant for a real radio: settings are never wri
 make HW=1 HW_NOTX=1       # ... every TX refused ("TX inhibited"): first smoke test on a real radio (build_hw_notx/)
 make HW=1 HW_SAVE=1       # ... codeplug loader: CPS link on PA9/PA10 + codeplug/settings flash writes (range-checked),
                           #     no PTT / no TX on the D890UV (PA10 = PTT). ONLY AFTER THE OWNER OKs FLASH WRITES.
+make HW=1 HW_SAVE=1 HW_PASSWORD=1  # ... also enforces the codeplug power-on password (build_hw_save_pw/; needs HW_SAVE=1)
 python3 tools/preflash_test.py --radio d890|d168   # emulator: pre-flash safety fixes F1-F9 (v0.6 below)
 tools/make_streams.sh     # host: test symbol streams (*.sym) + 48 kHz discriminator samples (*.adc16/*.adc8)
 make -C dsp test          # host: demodulator BER vs C/N + voice frames decoded, writes dsp/ber_table.md
@@ -80,7 +81,7 @@ Screens: `screens/`.
 | `0x0800A000` (16 B) | Activation key. Not ours; the cfw doesn't check it. |
 | `0x0800C000–0x0817FFFF` | cfw image. The vector table is at `0x0800C000`; the linker asserts it. |
 | `0x08180000–0x081DFFFF` | cfw codeplug, 384 KB written by the CPS link (`app/cfwcp.c`, own address guard; `make HW=1` compiles the write out, `make HW=1 HW_SAVE=1` keeps it, only after the owner's OK). See "CPS link" below. |
-| `0x081E0000–0x081E1FFF` | cfw settings page (`drivers/settings.c`). Besides the codeplug region below, this is the only flash the firmware ever erases or writes, and an address guard enforces that. `make HW=1` compiles the write out entirely (CLAUDE.md: no flash writes on real hardware without the owner's OK). |
+| `0x081E0000–0x081E1FFF` | cfw settings page (`drivers/settings.c`). Besides the codeplug region below, this is the only flash the firmware ever erases or writes, and an address guard enforces that. `make HW=1` compiles the write out entirely (project notes: no flash writes on real hardware without the owner's OK). |
 | `0x081E4000+` | Stock table cache. Not touched. |
 | External NAND | Read only. There is no program or erase code in `drivers/nand.c`. Per-channel edits are therefore kept as overrides in the settings page, not written back into the CPS codeplug. |
 
@@ -489,7 +490,7 @@ replaces the v0.4 stand-ins (VOX mic ADC slot, MCU-only volume gain, D890UV beep
 | Man down | both radios: LIS2DW12 0x19 on I2C SDA PB6 / SCL PB7; XL clear 30 polls -> ManDownWait -> alarm | `hal/accel.c`, `app/mandown.c` | `i2c Fall` -> "Alarming / MAN DOWN" + alarm tone after 1.5 + 2 s; `i2c Upright` cancels |
 | P25 keys | - | keys only with Settings > Encryption on (`cfw_p25_key`), reloaded on change | build + matrix (P25 cases) |
 
-Limits: D890UV codec register 0x0F and BT-headset audio not driven; stock TX alarm (emergency call) not done (the cfw
+Limits: D890UV BT-headset audio not driven; stock TX alarm (emergency call) not done (the cfw
 never keys TX by itself); whether D168UV FM audio passes the SCT3288 attenuation needs hardware; `$CFGSYS` always GPS
 (the GPS Mode setting is not mapped). The cfw CPS link uses USART1 on PB6 / PB7 in non-HW builds, which on the D890UV are
 the I2C lines (stock USART1 = PA9 / PA10); HW=1 builds have the link off. All unverified on hardware.
@@ -927,10 +928,17 @@ chip 1 pin meanings of the AM path. Auto Roaming "Out of Range" is not implement
 Found by these tests and fixed (2026-11-24): Busy Lock refused every transmission with squelch Off (the open squelch counted as
 a busy channel; now only the carrier counts then); the first private call after power on did not ring (empty call log).
 
+### Power-on password on HW builds (2026-11-24)
+HW builds ignore the codeplug power-on password: they show "PASSWORD OFF / HW build" once and log it on RTT, because a forgotten
+password could only be cleared by SWD or a reflash. `HW=1 HW_SAVE=1 HW_PASSWORD=1` enforces it: that build has the CPS link, which
+answers on the password screen, and a codeplug without the password opens the radio at once. Every other kind of build keeps the
+password. Only Password = 1 with 1 to 8 digits locks (8 is this firmware's choice); anything else stored there is ignored, so a
+corrupt value cannot block the boot. Tests: `tools/stockfx_test.py --only lock,lockhw,lockodd` 11/11, `tools/lock_cps_test.py` 5/5
+(normal and HW_SAVE + HW_PASSWORD builds, CPS read and write from the password screen), both radios.
+
 Test results (emulator, made-up codeplug, 2026-11-24):
-* `tools/stockopt_test.py`: D890UV 25/25, D168UV 23/23. `tools/stockfx_test.py`, all runs (tone, noaa, tbst, misc, scan, lock, bt, absent,
-  rpt2, aprs, emerg, emgrx, ring, alone, roam): PASS on both radios (run in parts on the builds of that day; `ring` and stockopt on
-  the last one before the battery percent was added).
+* `tools/stockopt_test.py`: D890UV 25/25, D168UV 23/23. `tools/stockfx_test.py`, all runs (tone, noaa, tbst, misc, scan, lock, lockhw, lockodd, bt,
+  absent, rpt2, aprs, emerg, emgrx, ring, alone, roam): PASS on both radios, all suites of this list on one frozen build.
 * features, sql, aprs, aprs_rx, sms_alias (both SMS formats), hwpaths, cal_crc, preflash 9/9, powercut 14/14, enc, nxdn_enc, sig 29/29,
   stock_sections: PASS on both radios. `emu/compare.py --seconds 15` (stock against the lifted build, real NAND image): screens identical.
 * The two-radio matrices (`emu/txrx_loop.py`) are run and reported separately.

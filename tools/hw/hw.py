@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.dirname(os.path.dirname(HERE))                  # D890UV_src
-PROJECTS = os.path.dirname(os.path.dirname(SRC))              # claude_projects
+PROJECTS = os.path.dirname(os.path.dirname(SRC))              # work folder
 BACKUP_ROOT = os.path.join(SRC, "hw_backups")
 
 

@@ -158,6 +158,7 @@ void     rf_rx_fm(int chip, bool wide);   /* analog FM receive */
 void     rf_tx_fm(int chip, bool on);     /* analog FM transmit (see README: TX register values unverified) */
 void     rf_set_ctcss(int chip, uint16_t tone_dhz);   /* 0 = off; tone in 0.1 Hz */
 void     rf_idle(int chip);
+void     rf_am_path(bool on);               /* D890UV: chip 0 antenna switches while chip 1 receives the AM air band */
 /* Receive status, the registers the stock squelch reads (FUN_080d22f0, see drivers/rf.c). */
 uint16_t rf_rssi(int chip);              /* reg 0x02 [9:0], raw */
 bool     rf_carrier(int chip);           /* reg 0x0E bit 14 */

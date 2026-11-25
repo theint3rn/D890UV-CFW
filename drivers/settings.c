@@ -96,7 +96,7 @@ static void program_qw(uint32_t addr, const uint32_t w[4])
 bool settings_save(uint32_t version, const void *buf, uint32_t len)
 {
 #ifdef CFW_HW_NO_SAVE
-    /* hardware build (make HW=1): no flash writes until the owner OKs it (CLAUDE.md hard rule) */
+    /* hardware build (make HW=1): no flash writes until the owner OKs it (project notes hard rule) */
     (void)version; (void)buf; (void)len;
     return false;
 #endif

@@ -1,4 +1,4 @@
-/* D890UV board pin map (from CLAUDE.md + the stock V1.05 functions cited per line). */
+/* D890UV board pin map (from project notes + the stock V1.05 functions cited per line). */
 #ifndef CFW_BOARD_H
 #define CFW_BOARD_H
 #include <stdbool.h>
@@ -77,12 +77,14 @@
 #define TX_PWM_TOP         2500u   /* cfw: TIM4 period at 120 MHz = 48 kHz (= ADC_FS), one sample per period */
 #define APC_DAC_PIN        4       /* PA4 = DAC1 ch1: TX power control (stock FUN_0801694c) */
 #define TUNE_DAC_PIN       5       /* PA5 = DAC1 ch2: UHF RX front-end tune (stock FUN_08010bf0) */
-/* speaker routing (drivers/audio.c, stock FUN_080c32e8 -> FUN_08118df8): PC12 = amplifier, PC7, RF reg 0x52 switches
- * 1 / 2 (RF-chip audio), baseband codec reg 0x0F (not driven by the cfw) */
+/* speaker routing (drivers/audio.c, stock FUN_080c32e8 -> FUN_08118df8): PC12 = amplifier, PC7, RF chip 1 reg 0x52
+ * switches 1 (baseband audio) / 2 (RF chip 0 audio) */
 #define AMP_PORT           GPIOC
 #define AMP_PIN            12
 #define AUD_PC7_PIN        7
-enum { AUDIO_MUTE = 0, AUDIO_RF = 1, AUDIO_BB = 3 };
+#define MCU_AUD_PORT       GPIOC   /* PC13 (stock FUN_0810e010): high in every chip 0 receive / transmit state, low with AM air; */
+#define MCU_AUD            13      /* meaning not measured (probably which receiver the MCU audio input PC0 hears) */
+enum { AUDIO_MUTE = 0, AUDIO_RF = 1, AUDIO_DIRECT = 2, AUDIO_BB = 3 };   /* DIRECT: MCU tone (PB9), broadcast receiver */
 void audio_route(int mode);
 #define TX_PTT_LINE_PORT   GPIOD   /* PD6 = baseband TX-state input (EXTI6, stock FUN_08061770) - not used by the cfw */
 #define TX_PTT_LINE        6
@@ -93,7 +95,11 @@ void audio_route(int mode);
 #define BB_RDY_PORT        GPIOD
 #define BB_RDY             11      /* byte ready */
 #define BB_PEND            7       /* frame pending */
-#define BB_RST             9       /* reset (stock FUN_080f4698) */
+#define BB_RST             9       /* PD9: high only for a re-init (stock FUN_080f4698), low while running */
+#define BB_NRST            8       /* PD8: low pulses at power on, high while running (FUN_080d6f5c) */
+#define BB_PD10            10      /* PD10: low (FUN_080d6f5c; FUN_080f2500 sets it, use unknown) */
+#define BB_PWR_PORT        GPIOC
+#define BB_PWR             6       /* PC6: high while running (FUN_080d6f5c), low = baseband off (FUN_080d7964) */
 
 
 /* analog outputs (drivers/dac.c) - D890UV only, not part of the shared HAL */

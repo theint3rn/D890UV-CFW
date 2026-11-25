@@ -24,6 +24,7 @@ bool stockfx_alias_on(const channel_t *c);     /* Send Talker Alias of this chan
 uint16_t stockfx_color(uint8_t which);         /* 0 channel name, 1 standby characters (RGB565) */
 /* power-on password (Optional Settings Power-on Password + characters) */
 bool stockfx_locked(void);                     /* the radio waits for the password: no TX */
+void stockfx_lock_recheck(void);               /* the codeplug changed (rset_init) */
 void stockfx_lock_key(int digit, bool enter, bool clear);
 int  stockfx_lock_len(void);
 /* NOAA */

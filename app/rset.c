@@ -5,6 +5,7 @@
 #include "gfx.h"
 #include "stockopt.h"
 #include "stockdlg.h"
+#include "stockfx.h"
 
 /* board key names for the six key slots (D168UV: PF1/PF2 post KEY_P1/KEY_P2, no PF3) */
 #ifndef CFW_KEY_SLOT_NAMES
@@ -113,6 +114,7 @@ void rset_init(void)
     }
     s_dirty = false;
     stockopt_init();                         /* stock common sections (app/stockopt.c) */
+    stockfx_lock_recheck();
     stockdlg_init();                         /* stock .rdt-only dialogs (app/stockdlg.c) */
 }
 

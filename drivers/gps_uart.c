@@ -1,4 +1,4 @@
-/* USART2 = GPS receiver (stock: NMEA $GNRMC/$GPGGA..., CLAUDE.md), 9600 8N1, interrupt per byte into the shared NMEA
+/* USART2 = GPS receiver (stock: NMEA $GNRMC/$GPGGA..., project notes), 9600 8N1, interrupt per byte into the shared NMEA
  * parser (app/gps.c). PCLK1 = 120 MHz. Pins as stock FUN_08063498 (USART2 init, called with 0x2580 = 9600 baud):
  * PA2 = TX, PA3 = RX, alternate function 7, pull-down, high speed. (FUN_080635c8 is the UART4 init: PC10 / PC11.)
  * TX: the stock module set-up lines (gps_uart_send_cfg). No GPS power switch: toggling Menu > GPS > GPS On/Off in the

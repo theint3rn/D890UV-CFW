@@ -9,6 +9,8 @@ made-up codeplugs from cfw_cps/examples/synth.d8cp. Runs (each its own codeplug 
   misc     Ana idle tone, AM/FM Function at power on, FM Monitor pause / resume, clock value (UTC+08:00)
   scan     VFO scan type SE stops on a signal; Auto Scan starts the channel's list
   lock     power-on password: PTT refused, wrong then right password
+  lockhw   HW builds ignore the password and say so; HW_SAVE=1 HW_PASSWORD=1 enforces it (needs those ELFs beside build/)
+  lockodd  odd / damaged password cells never lock
   bt       Bluetooth On: module commands (probe, gains)
   absent   plain synth codeplug: Menu Exit 5 s, channel colour Orange, Auto Repeater off
   rpt2     Auto Repeater2 range wins; AM offset negative (D890UV); private hot key; Quick Call; Options edit -> journal
@@ -37,7 +39,7 @@ import ui_test as U  # noqa: E402
 import stockopt_test as SO  # noqa: E402
 from stockopt_test import C, ST, EXTRAS, chan, tuned, check  # noqa: E402
 
-RUNS = ["tone", "noaa", "tbst", "misc", "scan", "lock", "bt", "absent", "rpt2", "aprs", "emerg", "emgrx", "ring", "alone", "roam"]
+RUNS = ["tone", "noaa", "tbst", "misc", "scan", "lock", "lockhw", "lockodd", "bt", "absent", "rpt2", "aprs", "emerg", "emgrx", "ring", "alone", "roam"]
 FS = 48000
 
 
@@ -192,6 +194,26 @@ def main():
                      "keys:2,2,2,13", "wait:0.3", by("s_lock"), "keys:2,3,4,5,13", "wait:0.5", by("s_lock")])
         check(res, "password screen, PTT refused, wrong 111, right 1234", "PASSWORD" in t and nums(v, "ReadByte") == [1, 2]
               and "TX TEST" not in t, str(nums(v, "ReadByte")))
+
+    if "lockodd" in only:                      # odd / damaged password cells must never lock
+        bad = [("1", "12A4"), ("1", ""), ("1", "123456789"), ("1", "    "), ("7", "1234"), ("0", "1234")]
+        for i, (on, pw) in enumerate(bad):
+            build(R["model"], cpp("lockodd"), lambda cp, o: (o("Password", on), o("Password_Char", pw)))
+            v, t, _ = ui(a.radio, elf, cpp("lockodd"), n("lockodd"), ["wait:0.5", "key:13", by("s_lock")])
+            check(res, "Password %s '%s': radio opens" % (on, pw), nums(v, "ReadByte") == [2] and "Power-on password" not in t, str(nums(v, "ReadByte")))
+
+    if "lockhw" in only:                       # HW builds: ignored (said once); HW_SAVE + HW_PASSWORD: enforced
+        build(R["model"], cpp("lockhw"), lambda cp, o: (o("Password", 1), o("Password_Char", "1234")))
+        for k, locked in (("build_hw", False), ("build_hw_notx", False), ("build_hw_save", False), ("build_hw_save_pw", True)):
+            e = elf.replace("/build/", "/%s/" % k)
+            if not os.path.exists(e):
+                check(res, "%s: no ELF" % k, False)
+                continue
+            adr = next(int(x.split()[0], 16) for x in subprocess.check_output(["arm-none-eabi-nm", e], text=True).splitlines() if x.split()[-1] == "s_lock")
+            v, t, _ = ui(a.radio, e, cpp("lockhw"), n("lockhw"), ["shot", "wait:0.5", "key:13", "wait:0.3", "0|sysbus ReadByte 0x%08X" % adr])
+            got = nums(v, "ReadByte")
+            check(res, "%s: %s" % (k, "password enforced" if locked else "password off, said on the screen"),
+                  got == [1 if locked else 2] and ("PASSWORD OFF" in t) != locked and ("Power-on password" in t) == locked, str(got))
 
     if "bt" in only:
         build(R["model"], cpp("bt"), lambda cp, o: (o("BlueToothOn", 1), o("BhtMicGain", 4), o("BhtSpkGain", 1)))

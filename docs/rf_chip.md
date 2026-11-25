@@ -87,6 +87,21 @@ Registers with no constant-address access in V1.05 (3 sites write a variable reg
 `FUN_080c39b8`, `FUN_080e3188`, `FUN_080e3358`; 2 sites read one: `FUN_08049e10`): 0x00–0x0A, 0x0F, 0x28, 0x2C, 0x33–0x3B, 0x3E, 0x3F (one write, 0x3232),
 0x4A–0x4C, 0x4E, 0x4F, 0x51, 0x5A, 0x61–0x65, 0x67, 0x6A–0x7F.
 
+## Reg 0x52: switch outputs, one set per chip
+
+`val = switch << 12 | state | 0x40`; `FUN_080e2f64(reg, val, chip)`, chip 0 = CS PB5, chip 1 = CS PD3 (V1.05 decompile and
+emulator traces, 2026-11-24; nothing measured on hardware).
+
+| Chip | Switches | Written by | Use |
+|---|---|---|---|
+| 1 | 1, 2 | `FUN_08019ab4` | speaker audio: 1 = baseband / digital, 2 = chip 0 analog (stock trace `1 52 2041` on an FM signal); both off for PC7 = chip 1 analog, broadcast, AM, tone |
+| 1 | 5, 4 (broadcast: 1, 0); 5, 7, 4 (AM: 1 1 1); 0 | | receiver path of chip 1; 0 = 1 in receive, meaning unknown (bench) |
+| 0 | 0, 6, 7, 4 | `FUN_08010b2c` | receive path: VHF 0 1 1 0, UHF 1 0 0 1 |
+| 0 | 0, 6, 5, 3 | `FUN_08010b2c` | transmit: 0, 0, 5 only 200-300 MHz, 3 = UHF |
+
+Before 2026-11-24 the cfw wrote switches 1 and 2 to chip 0. Test: `tools/rfswitch_test.py`; full comparison: `RF_COMPARE.md`.
+The D168UV has one RF chip, its switches differ (`RF_COMPARE.md`).
+
 ## Comparison with known parts
 
 | Part | Frequency registers | Bus | Match? |

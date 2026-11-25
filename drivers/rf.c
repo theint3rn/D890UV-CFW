@@ -9,11 +9,14 @@
 #include "board.h"
 #include "hal.h"
 #include "radio.h"
+#include "bcast.h"
 
 #define SCK_LO() gpio_clr(RF_SCK_PORT, RF_SCK)
 #define SCK_HI() gpio_set(RF_SCK_PORT, RF_SCK)
 
 static uint32_t s_freq[2];
+static bool s_txing, s_rxing, s_am;                     /* chip 0 transmitting; AM air band running (drivers/bcast.c) */
+static uint8_t s_sw0;                          /* shadow of chip 0's reg 0x52 outputs, all 0 after rf_init */
 
 static inline void bitdelay(void)              /* stock FUN_080e2c28: ~5-iteration spin */
 {
@@ -76,8 +79,10 @@ void rf_tx_kill(void)
     cs(1, false);
     gpio_mode(RF_SDA_PORT, RF_SDA, GPIO_OUT, PULL_NONE);
     rf_write(0, 0x52, 0x0041);
+    s_sw0 |= 1u;
     rf_write(0, 0x56, 0x0000);
     rf_write(0, 0x30, 0x5F00);
+    s_txing = false;
 }
 
 uint16_t rf_read(int chip, uint8_t reg)
@@ -121,8 +126,8 @@ static const struct rv k_init_b[] = {        /* after the frequency: */
     {0x59, 0x221C}, {0x29, 0x1090}, {0x56, 0x0000}, {0x3C, 0x00FC},
 };
 
-/* stock FUN_0810ea14(p1, 0, chip): RX path set-up. p1 = 0 / 1 (two receive filter sets; which is
- * wide/narrow is not confirmed). Includes FUN_080c3d18 / FUN_080c39e4 coefficient tables. */
+/* stock FUN_0810ea14(p1, 0, chip): RX path set-up, p1 = 0 analog (k_rx0, 12.5 and 25 kHz alike), 1 digital (k_rx1):
+ * FUN_0811586c(channel type), seen in the register traces of both. Includes FUN_080c3d18 / FUN_080c39e4 coefficient tables. */
 static const struct rv k_rx0[] = {
     {0x11, 0x041A}, {0x2B, 0x708D}, {0x53, 0x773F}, {0x26, 0x6468}, {0x27, 0x6080}, {0x27, 0x199C},
     {0x18, 0x006E}, {0x19, 0x0381}, {0x24, 0xF4AF}, {0x25, 0x0B56}, {0x32, 0x22A2},
@@ -145,11 +150,39 @@ static const struct rv k_tx[] = {
 
 #define N(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
+/* Chip 0 reg 0x52 = eight switch outputs, written as idx << 12 | 0x40 | value (stock FUN_08010b2c, on change). Band /
+ * antenna switches, split at 300 MHz. From the decompile of V1.05; receive and transmit on both bands also seen in register
+ * traces of the stock firmware in the emulator (tools/rf_compare.py); none measured on a radio:
+ *   receive (FUN_0810d490, one channel watched)   UHF 0 = 1, 6 = 0, 7 = 0, 4 = 1    VHF 0 = 0, 6 = 1, 7 = 1, 4 = 0
+ *   with the AM air band on chip 1                UHF 0 = 1, 6 = 0, 7 = 1, 4 = 0    VHF 0 = 0, 6 = 0, 7 = 0, 4 = 1
+ *   transmit (+ FUN_0811b308)   0 = 0 (before anything else), 6 = 0, 5 = 1 only at 200..300 MHz, 3 = 1 UHF / 0 VHF last
+ */
+static void sw0(int idx, bool on)
+{
+    uint8_t m = (uint8_t)(1u << idx);
+    if(on == ((s_sw0 & m) != 0)) { return; }
+    s_sw0 = on ? (uint8_t)(s_sw0 | m) : (uint8_t)(s_sw0 & ~m);
+    rf_write(0, 0x52, (uint16_t)((idx << 12) | 0x40 | (on ? 1 : 0)));
+}
+static bool is_uhf(uint32_t hz) { return hz >= 300000000u; }
+static void band_rx(void)
+{
+    bool u = is_uhf(s_freq[0]);
+    sw0(5, false);
+    sw0(0, u);
+    sw0(6, !u && !s_am);
+    sw0(7, u == s_am);
+    sw0(4, u != s_am);
+}
+void rf_am_path(bool on) { s_am = on; if(!s_txing) { band_rx(); } }
+
 bool rf_init(int chip)
 {
     /* boot self-test as stock: write reg 0x57 = 0xA888, read it back */
     rf_write(chip, 0x57, 0xA888);
     bool ok = rf_read(chip, 0x57) == 0xA888;
+    for(int i = 0; i < 8; i++) { rf_write(chip, 0x52, (uint16_t)((i << 12) | 0x40)); }   /* stock FUN_0805f640 */
+    if(chip == 0) { s_sw0 = 0; s_txing = s_rxing = false; }
     write_list(chip, k_init_a, N(k_init_a));
     write_list(chip, k_rx0, N(k_rx0));
     rf_write(chip, 0x19, 0x0381);
@@ -180,48 +213,100 @@ void rf_set_sql(int level)
 
 uint16_t rf_sql_thr(void) { return s_thr; }
 
+static void rx_on(void);
+static void band_table(void);
 void rf_set_freq(int chip, uint32_t hz)
 {
-    s_freq[chip & 1] = hz;
+    chip &= 1;
+    bool rx = chip == 0 && s_rxing && !s_txing;
+    bool band = is_uhf(hz) != is_uhf(s_freq[0]);
+    s_freq[chip] = hz;
+    if(rx) { rf_write(0, 0x56, 0x0000); }               /* stock: receiver off around every frequency change */
     rf_write(chip, 0x69, (uint16_t)(hz >> 16));
     rf_write(chip, 0x68, (uint16_t)hz);
-    if((chip & 1) == 0) {
+    if(chip == 0) {
         dac_rx_tune(hz);                                /* stock FUN_08117034: front-end tune follows the frequency */
         sql_write();
+        if(!s_txing) { band_rx(); }
+        if(rx) {
+            if(band) { band_table(); sql_write(); }
+            rx_on();
+        }
     }
 }
 
-/* stock FUN_080e4154(0, chip): analog receive -> reg 0x30 = 0x5F00 + 0x77 (+8 if the channel's bit 6
- * flag at +0x34 is set; DAT_200151c4 == 'f' variant uses 0x74). FUN_08116480(0): reg 0x48 = 0x082E. */
+/* Receive, register for register as the stock firmware ends with after a transmission and on a channel change (V1.05
+ * register traces in the emulator, tools/rf_compare.py, docs/RF_COMPARE.md; functions in the comments; not measured on a
+ * radio). Until 2026-11-24 the cfw never wrote reg 0x56 = 1 (receiver on) here and used the VHF tables on both bands.
+ * Left as before: reg 0x30 = 0x5F77 for analog (the stock value is 0x5F74 with the calibration byte DAT_200151c4 = 'f',
+ * else 0x5F77; + 8 with channel bit 6 of +0x34). wide = 25 kHz, analog only (digital channels are always narrow). */
+static void rx_on(void)                                /* FUN_080e35c0: the receiver runs only with reg 0x56 = 1 */
+{
+    rf_write(0, 0x58, 0xF1F0);
+    rf_write(0, 0x5F, s_freq[0] < 390000000u ? 0x0468 : 0x0569);
+    rf_write(0, 0x60, 0x0309);
+    rf_write(0, 0x56, 0x0001);
+}
+static void band_table(void)                           /* FUN_081155ac */
+{
+    static const struct rv k_vhf[] = { {0x53, 0x773F}, {0x53, 0x673F}, {0x53, 0x567F}, {0x53, 0x467F}, {0x53, 0x363A}, {0x53, 0x263A},
+                                       {0x53, 0x1634}, {0x53, 0x00F0}, {0x42, 0x46A1}, {0x43, 0x1F4F}, {0x49, 0x706A} };
+    static const struct rv k_uhf[] = { {0x53, 0x773F}, {0x53, 0x673F}, {0x53, 0x567F}, {0x53, 0x463D}, {0x53, 0x363A}, {0x53, 0x2637},
+                                       {0x53, 0x1634}, {0x53, 0x00F0}, {0x42, 0x46A1}, {0x43, 0x1F4F}, {0x49, 0x706A} };
+    write_list(0, is_uhf(s_freq[0]) ? k_uhf : k_vhf, N(k_vhf));
+}
 void rf_rx_fm(int chip, bool wide)
 {
-    write_list(chip, wide ? k_rx0 : k_rx1, wide ? N(k_rx0) : N(k_rx1));
-    rf_write(chip, 0x48, 0x082E);
-    rf_set_freq(chip, s_freq[chip & 1]);
-    rf_write(chip, 0x56, 0x0000);
-    rf_write(chip, 0x30, 0x5F77);
-    if((chip & 1) == 0) { audio_route(radio_current()->mode == CFW_MODE_FM ? AUDIO_RF : AUDIO_BB); }   /* drivers/audio.c */
+    bool fm = radio_current()->mode == CFW_MODE_FM;
+    s_txing = false;
+    s_rxing = true;
+    band_rx();
+    rf_write(0, 0x56, 0x0000);
+    rf_write(0, 0x16, 0x0000);
+    rf_write(0, 0x3F, 0x3232);
+    rf_write(0, 0x2A, fm ? 0x1081 : 0x108C);           /* FUN_08116f40 -> FUN_08114b48 */
+    write_list(0, fm ? k_rx0 : k_rx1, fm ? N(k_rx0) : N(k_rx1));
+    rf_write(0, 0x30, fm ? 0x5F77 : 0x5F75);           /* FUN_080e4154 */
+    rf_write(0, 0x10, fm ? 0xA3A3 : 0xA3E0);
+    rf_write(0, 0x11, fm ? 0x041A : 0x0000);
+    if(fm) { rf_write(0, 0x18, 0x006E); }
+    rf_write(0, 0x69, (uint16_t)(s_freq[0] >> 16));
+    rf_write(0, 0x68, (uint16_t)s_freq[0]);
+    rf_write(0, 0x48, !fm ? 0x016E : wide ? 0x9826 : 0x082E);   /* FUN_08116480 */
+    rf_write(0, 0x1A, 0x64C1);                         /* FUN_08115ee8 */
+    rf_write(0, 0x1B, 0x1258);
+    rf_write(0, 0x18, 0x0068);                         /* FUN_08025d04 */
+    band_table();
+    sql_write();
+    dac_rx_tune(s_freq[0]);
+    rx_on();
+    if(chip == 0 && bcast_band() == BC_OFF) { audio_route(fm ? AUDIO_RF : AUDIO_BB); }   /* drivers/audio.c */
 }
 
 /* Transmit keying, as the stock firmware does it (PTT trace by the cfw-emu session, an analog channel at 449.440 FM):
  *   reg 0x52 = 0x0040, 0x56 = 0, frequency, TX set-up regs (k_tx = FUN_0810ea14(x,1,0)), then
- *   reg 0x56 = 0x0002 and reg 0x52 = 0x3041 = TX ON (stock never uses reg 0x30 to key TX);
- *   release: reg 0x52 = 0x0041 -> 0x4041, RX regs, reg 0x30 = 0x5F77.
+ *   reg 0x56 = 0x0002 = transmitter on, then switch 3 (0x3041 on UHF; stock never uses reg 0x30 to key TX);
+ *   release: band switches back to receive (band_rx; 0x0041, 0x4041 on UHF), RX regs, reg 0x30 = 0x5F77.
  * The PA control level on DAC1 ch1 (PA4) + TX enables PE1 / PA15 (stock IRQ17_Handler) are set by the caller (dac_apc).
  * Unverified on hardware: test into a dummy load. */
 void rf_tx_fm(int chip, bool on)
 {
     if(on) {
         if((chip & 1) == 0) { audio_route(AUDIO_MUTE); }           /* stock: speaker off while transmitting */
-        rf_write(chip, 0x52, 0x0040);
+        s_txing = true;
+        s_rxing = false;
+        sw0(0, false);
+        sw0(6, false);
         rf_write(chip, 0x56, 0x0000);
         rf_set_freq(chip, s_freq[chip & 1]);
+        sw0(5, s_freq[0] >= 200000000u && s_freq[0] < 300000000u);
         write_list(chip, k_tx, N(k_tx));
+        bool lo = s_freq[0] < 390000000u;              /* FUN_080e3c68, as the trace */
+        rf_write(chip, 0x5E, lo ? 0x0468 : 0x0569);
+        rf_write(chip, 0x60, lo ? 0x0306 : 0x0309);
         rf_write(chip, 0x56, 0x0002);
-        rf_write(chip, 0x52, 0x3041);
+        sw0(3, is_uhf(s_freq[0]));
     } else {
-        rf_write(chip, 0x52, 0x0041);
-        rf_write(chip, 0x52, 0x4041);
         rf_rx_fm(chip, true);
     }
 }
@@ -246,6 +331,11 @@ int rf_rssi_dbm(uint16_t raw) { return (int)raw / 2 - 160; }
 
 void rf_idle(int chip)
 {
+    if(chip & 1) { rf_write(1, 0x56, 0x0000); return; }   /* stock: chip 1 idle = reg 0x56 0, reg 0x30 stays 0x5F6B */
     rf_write(chip, 0x30, 0x5F00);                      /* stock FUN_0811c83c(1) */
-    if((chip & 1) == 0) { audio_route(AUDIO_MUTE); }
+    if((chip & 1) == 0) {
+        rf_write(0, 0x56, 0x0000);
+        s_rxing = false;
+        audio_route(AUDIO_MUTE);
+    }
 }

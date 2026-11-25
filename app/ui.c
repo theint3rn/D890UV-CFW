@@ -1050,6 +1050,7 @@ void ui_draw(void)
         uint32_t mx = stockopt_menu_exit_s();     /* stock Menu Exit Time */
         if(mx && s_screen != SCR_MAIN && s_screen != SCR_LOCK && !g_radio.tx && now - s_last_key >= mx * 1000u) { s_screen = SCR_MAIN; }
         if(s_screen != SCR_LOCK && stockfx_locked()) { s_screen = SCR_LOCK; }
+        if(s_screen == SCR_LOCK && !stockfx_locked()) { s_screen = SCR_MAIN; }   /* CPS wrote a codeplug without it */
         uint32_t apo = rset_apo_s();
         if(apo && !g_radio.tx && now - g_radio.last_activity >= apo * 1000u) { power_off(); }
         if(g_radio.tot_hit && !s_tot_shown) { popup("TX TIMEOUT", "release PTT", C_RED); }

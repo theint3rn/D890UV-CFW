@@ -7,6 +7,7 @@
 #   make HW=1 HW_NOTX=1 -> ... every TX refused ("TX inhibited"): first smoke test on a real radio
 #   make HW=1 HW_SAVE=1 -> ... codeplug loader: CPS link on the programming pins PA9/PA10 + codeplug/settings flash
 #                        writes (range-checked). ONLY AFTER THE OWNER OKs FLASH WRITES. PA10 is also PTT: no TX.
+#   make HW=1 HW_SAVE=1 HW_PASSWORD=1 -> ... enforces the stock power-on password (other HW builds ignore it, so nobody is locked out)
 #   make KEEP_SWD=1   -> do not use PA14 (SWCLK) as the PF2 key input, keeps the debugger usable
 #   make DEBUG=1      -> debug build in <build>_dbg/: KEEP_SWD=1 + SEGGER RTT log (hal/dbg.h, read with tools/hw/hw.py log)
 #   make gdb          -> gdb-multiarch on the ELF via tools/hw/gdb/<radio>.gdb (needs a running OpenOCD or JLinkGDBServer)
@@ -30,7 +31,7 @@ ifeq ($(HW),1)
 BUILD   := build_hw
 endif
 # one directory per variant: objects built with different flags must not mix (dependencies do not track CFLAGS)
-BUILD   := $(BUILD)$(if $(filter 1,$(HW_DTX)),_dtx)$(if $(filter 1,$(HW_NOTX)),_notx)$(if $(filter 1,$(HW_SAVE)),_save)
+BUILD   := $(BUILD)$(if $(filter 1,$(HW_DTX)),_dtx)$(if $(filter 1,$(HW_NOTX)),_notx)$(if $(filter 1,$(HW_SAVE)),_save)$(if $(filter 1,$(HW_PASSWORD)),_pw)
 ifeq ($(DEBUG),1)
 BUILD   := $(BUILD)_dbg
 KEEP_SWD := 1
@@ -94,6 +95,13 @@ CFLAGS += -DCFW_PROG_PA9 -DCFW_HW_NOTX
 else
 CFLAGS += -DCFW_HW_NO_SAVE
 endif
+# HW_PASSWORD=1: enforce the stock power-on password on a real radio. Only with HW_SAVE=1 (the CPS link is the way back)
+ifeq ($(HW_PASSWORD),1)
+ifneq ($(HW_SAVE),1)
+$(error HW_PASSWORD=1 needs HW_SAVE=1: without the CPS link a forgotten password could only be cleared with SWD)
+endif
+CFLAGS += -DCFW_HW_PASSWORD
+endif
 ifeq ($(HW_DTX),1)
 CFLAGS += -DCFW_DIGITAL_TX
 endif
@@ -106,7 +114,7 @@ CFLAGS += -DCFW_HW_NOTX
 endif
 # F8: version / build string (boot screen, RTT boot line, CPS link info block)
 CFW_VER  := 0.6
-CFW_KIND := $(if $(filter 1,$(HW)),HW,$(if $(filter 1,$(EMU)),EMU,SIM))$(if $(filter 1,$(HW_DTX)),+DTX)$(if $(filter 1,$(HW_NOTX)),+NOTX)$(if $(filter 1,$(HW_SAVE)),+SAVE)$(if $(filter 1,$(DEBUG)),+DBG)
+CFW_KIND := $(if $(filter 1,$(HW)),HW,$(if $(filter 1,$(EMU)),EMU,SIM))$(if $(filter 1,$(HW_DTX)),+DTX)$(if $(filter 1,$(HW_NOTX)),+NOTX)$(if $(filter 1,$(HW_SAVE)),+SAVE)$(if $(filter 1,$(HW_PASSWORD)),+PW)$(if $(filter 1,$(DEBUG)),+DBG)
 CFW_DATE := $(shell date +%y%m%d)
 CFLAGS += -DVERSION='"$(CFW_VER)"' -DCFW_BUILD='"D890 $(CFW_KIND) $(CFW_DATE)"'
 

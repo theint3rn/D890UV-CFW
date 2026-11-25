@@ -30,7 +30,7 @@ Hard rules (enforced in `tools/hw/hw.py`, not only policy):
 | Bench supply 7.4–8.4 V, current limit ~1.5 A | In place of the battery: a stuck PTT or a short cannot burn anything. |
 | (optional) ST-Link V3MINIE | Works for the D890 through OpenOCD (`--probe stlink`). Not recommended for the D168: ST-Link firmware may refuse non-ST parts. |
 
-## 2. Host software (Debian 13). You install it; Claude does not run sudo.
+## 2. Host software (Debian 13). Install it yourself.
 
 1. **SEGGER J-Link Software and Documentation Pack**, Linux 64-bit `.deb`. Download it from segger.com (you
    accept the licence there), then install it:
@@ -147,8 +147,7 @@ Guards for `flash` / `recover` / `codeplug`, in this order. Nothing is written u
    codeplug.
 4. A **verified backup of this exact chip UID** exists, and the bootloader on the chip still hashes the same as in
    that backup.
-5. Typed confirmation `FLASH <last 8 hex digits of UID>`. There is no `--yes`. Claude pipes the phrase only after
-   you said yes in chat.
+5. Typed confirmation `FLASH <last 8 hex digits of UID>`. There is no `--yes`. Type the phrase yourself.
 6. After writing: the probe's verify, plus hw.py's own read-back compare, plus protection register and bootloader
    hash unchanged. Any difference: stop and tell you to run `recover`. Only then reset + run.
 

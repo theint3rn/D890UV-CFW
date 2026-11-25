@@ -4,7 +4,7 @@
  * Read = 0x13 page-read-to-cache (24-bit row), poll 0x0F C0 until OIP clear, 0x03 read-from-cache
  * (16-bit column + dummy). 4 KiB pages; CPS address == NAND byte address. Stock uses the x2 read 0x3B;
  * x1 is simpler and fine for now.
- * There is deliberately no program/erase code here (see CLAUDE.md: NAND writes only via tools/hw). */
+ * There is deliberately no program/erase code here (see project notes: NAND writes only via tools/hw). */
 #include "stm32u5.h"
 #include "board.h"
 #include "hal.h"

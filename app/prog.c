@@ -1,6 +1,6 @@
 /* CPS programming link (codeplug only) on USART1, the programming-cable UART.
  *
- * Framing = the stock D890UV PC link (CLAUDE.md "PC link"), with a cfw address space:
+ * Framing = the stock D890UV PC link (project notes "PC link"), with a cfw address space:
  *   "PROGRAM"                        -> "QX" 06                      enter program mode (UI shows PROGRAM MODE)
  *   02                               -> 'I' "D890CFW" 00 fwMaj fwMin cpVer caps maxKB(BE16) 06   (16 bytes)
  *   'R' a3 a2 a1 a0 len              -> 'W' a3 a2 a1 a0 len data cs 06    cs = sum(addr,len,data) & 0xFF

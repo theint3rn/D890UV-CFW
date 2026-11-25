@@ -285,7 +285,7 @@ void dac_rx_tune(uint32_t hz)
     s_hz = hz;
     if(!s_tune_ok) { DAC_DHR12R2 = 0x800u; return; }        /* no tune tables: mid-scale, RF reg 0x5C untouched */
     uint16_t v = dac_tune_value(hz);
-    if(hz >= 300000000u) { DAC_DHR12R2 = (uint32_t)(v << 4) & 0xFFFu; }
+    if(hz >= 300000000u) { DAC_DHR12R2 = (uint32_t)(v << 4) & 0xFFFu; rf_write(0, 0x5C, 0x1000); }   /* stock: 0x1000 on UHF */
     else { rf_write(0, 0x5C, (uint16_t)(((v & 0xFFu) << 4) | 0x1000u)); }   /* stock FUN_0801a35c */
 }
 
